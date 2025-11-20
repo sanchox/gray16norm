@@ -1,0 +1,16 @@
+# Build artifacts
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.dll
+*.dylib
+
+# Debug/IDE
+*.dSYM/
+*.swp
+.DS_Store
+
+# GStreamer registry cache (user-specific; listed for reference, not in repo)
+# ~/.cache/gstreamer-1.0/registry.*
