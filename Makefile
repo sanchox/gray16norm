@@ -3,8 +3,16 @@ PKG_CONFIG  ?= pkg-config
 
 # Plugin name (output .so)
 TARGET      ?= libgstgray16norm.so
-SRC         := gstgray16norm.c
+SRC         := gstgray16norm.c gstgray16plugin.c
 OBJ         := $(SRC:.c=.o)
+
+# Mandatory LUT headers (generated at build time)
+LUT_HEADERS := \
+  gray16_to_rgb_lut.h \
+  gray16_to_rgb_lut_viridis.h \
+  gray16_to_rgb_lut_magma.h \
+  gray16_to_rgb_lut_jet.h \
+  gray16_to_rgb_lut_prism.h
 
 # Dependencies
 GST_DEPS    ?= gstreamer-1.0 gstreamer-video-1.0
@@ -25,7 +33,8 @@ INSTALL_DIR ?= $(HOME)/.local/lib/gstreamer-1.0
 
 .PHONY: all clean install uninstall debug \
         test test-smoke test-functional test-all \
-        format check-format lint style
+        format check-format lint style \
+        generate-luts
 
 all: $(TARGET)
 
@@ -34,6 +43,14 @@ $(TARGET): $(OBJ)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Ensure LUTs are present before compiling element that uses them
+gstgray16norm.o: $(LUT_HEADERS)
+
+# Generate all LUT headers when any is missing or older than lut_gen.py
+$(LUT_HEADERS): lut_gen.py
+	@echo "Generating LUT headers (turbo, viridis, magma, jet, prism)..."
+	@python3 lut_gen.py --all
 
 install: $(TARGET)
 	@echo "Installing to $(INSTALL_DIR)..."
@@ -45,7 +62,8 @@ uninstall:
 	$(RM) -f "$(INSTALL_DIR)/$(TARGET)"
 
 clean:
-	$(RM) -f $(OBJ) $(TARGET)
+	$(RM) -f $(OBJ) $(TARGET) $(LUT_HEADERS) \
+		gstgray16rgb.o
 
 # Quick build with sanitizers
 debug:
@@ -89,3 +107,6 @@ lint:
 	fi
 
 style: check-format lint
+
+# Generate LUT headers (requires python3, numpy, matplotlib)
+generate-luts: $(LUT_HEADERS)

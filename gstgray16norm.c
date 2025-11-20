@@ -12,6 +12,14 @@
 #include <gst/base/gstbasetransform.h>
 #include <gst/gstutils.h>
 #include <string.h>
+#include <stdint.h>
+
+/* Mandatory LUTs: generated at build time via Makefile (lut_gen.py --all) */
+#include "gray16_to_rgb_lut.h"           /* gray16_to_rgb (turbo) */
+#include "gray16_to_rgb_lut_viridis.h"   /* gray16_to_rgb_viridis */
+#include "gray16_to_rgb_lut_magma.h"     /* gray16_to_rgb_magma */
+#include "gray16_to_rgb_lut_jet.h"       /* gray16_to_rgb_jet */
+#include "gray16_to_rgb_lut_prism.h"     /* gray16_to_rgb_prism */
 
 /* Use intrinsics when available (compile-time selection). */
 #if defined(__ARM_NEON) || defined(__aarch64__)
@@ -35,7 +43,6 @@
 #else
 #define GST_GRAY16NORM_HAVE_GNU_VECTOR 0
 #endif
-
 #ifndef PACKAGE
 #define PACKAGE "gray16norm"
 #endif
@@ -43,12 +50,23 @@
 GST_DEBUG_CATEGORY_STATIC (gst_gray16norm_debug);
 #define GST_CAT_DEFAULT gst_gray16norm_debug
 
+typedef enum {
+    GST_GRAY16NORM_PALETTE_TURBO = 0,
+    GST_GRAY16NORM_PALETTE_VIRIDIS,
+    GST_GRAY16NORM_PALETTE_MAGMA,
+    GST_GRAY16NORM_PALETTE_JET,
+    GST_GRAY16NORM_PALETTE_PRISM,
+} GstGray16NormPalette;
+
 typedef struct GstGray16Norm {
 	GstVideoFilter parent;
 
 	gboolean auto_range;
 	guint16  black_level;
 	guint16  white_level;
+
+	/* RGB LUT palette selection (used only when output is RGB) */
+	GstGray16NormPalette palette;
 
 	GstVideoInfo in_info;
 	GstVideoInfo out_info;
@@ -81,7 +99,7 @@ GST_STATIC_PAD_TEMPLATE (
 		"src",
 		GST_PAD_SRC,
 		GST_PAD_ALWAYS,
-		GST_STATIC_CAPS ("video/x-raw, format=(string)GRAY8")
+		GST_STATIC_CAPS ("video/x-raw, format=(string){ GRAY8, RGB }")
 		);
 
 /* No separate helper: transform is optimized to be two-pass, stride-aware, and allocation-free. */
@@ -90,8 +108,8 @@ GST_STATIC_PAD_TEMPLATE (
 
 static gboolean
 gst_gray16norm_set_info (GstVideoFilter * video_filter,
-		GstCaps * incaps, GstVideoInfo * in_info,
-		GstCaps * outcaps, GstVideoInfo * out_info)
+        GstCaps * incaps, GstVideoInfo * in_info,
+        GstCaps * outcaps, GstVideoInfo * out_info)
 {
 	GstGray16Norm *self = GST_GRAY16NORM (video_filter);
 
@@ -102,10 +120,11 @@ gst_gray16norm_set_info (GstVideoFilter * video_filter,
 		GST_ERROR_OBJECT (self, "Only GRAY16_LE supported on sink");
 		return FALSE;
 	}
-	if (GST_VIDEO_INFO_FORMAT (out_info) != GST_VIDEO_FORMAT_GRAY8) {
-		GST_ERROR_OBJECT (self, "Only GRAY8 supported on src");
-		return FALSE;
-	}
+	if (GST_VIDEO_INFO_FORMAT (out_info) != GST_VIDEO_FORMAT_GRAY8 &&
+        GST_VIDEO_INFO_FORMAT (out_info) != GST_VIDEO_FORMAT_RGB) {
+        GST_ERROR_OBJECT (self, "Only GRAY8 or RGB supported on src");
+        return FALSE;
+    }
 
 	return TRUE;
 }
@@ -270,13 +289,81 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
 
     /* Degenerate range: fill zeros quickly */
     if (G_UNLIKELY (maxPixelValue <= minPixelValue)) {
-      for (gsize y = 0; y < height; y++) {
-        guint8 *out_line = out_base + y * out_stride;
-        memset (out_line, 0, (size_t) width);
+      /* Handle both output formats */
+      if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_RGB) {
+        for (gsize y = 0; y < height; y++) {
+          guint8 *out_line = out_base + y * out_stride;
+          memset (out_line, 0, (size_t) (width * 3));
+        }
+      } else {
+        for (gsize y = 0; y < height; y++) {
+          guint8 *out_line = out_base + y * out_stride;
+          memset (out_line, 0, (size_t) width);
+        }
       }
       return GST_FLOW_OK;
     }
 
+    /* If RGB output requested, take a dedicated path using LUT on normalized 16-bit */
+    if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_RGB) {
+      const guint32 range = (guint32) (maxPixelValue - minPixelValue);
+
+      /* Pick LUT pointer based on palette */
+      const uint8_t (*lut)[3] = NULL;
+      switch (self->palette) {
+        case GST_GRAY16NORM_PALETTE_TURBO:   lut = gray16_to_rgb; break;
+        case GST_GRAY16NORM_PALETTE_VIRIDIS: lut = gray16_to_rgb_viridis; break;
+        case GST_GRAY16NORM_PALETTE_MAGMA:   lut = gray16_to_rgb_magma; break;
+        case GST_GRAY16NORM_PALETTE_JET:     lut = gray16_to_rgb_jet; break;
+        case GST_GRAY16NORM_PALETTE_PRISM:   lut = gray16_to_rgb_prism; break;
+        default:                              lut = gray16_to_rgb; break;
+      }
+
+      if (G_LIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
+        /* Full-range manual mapping: index == v */
+        for (gsize y = 0; y < height; y++) {
+          const guint8 *in_line = in_base + y * in_stride;
+          guint8 *out_line = out_base + y * out_stride;
+          for (gsize x = 0; x < width; x++) {
+            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
+            const uint8_t *rgb = lut[v];
+            const gsize off = 3 * x;
+            out_line[off + 0] = rgb[0];
+            out_line[off + 1] = rgb[1];
+            out_line[off + 2] = rgb[2];
+          }
+        }
+        return GST_FLOW_OK;
+      }
+
+      /* General case: compute normalized index in [0..65535] with rounding */
+      const guint32 scale = 65535u; /* numerator in (t * scale + range/2) / range */
+      for (gsize y = 0; y < height; y++) {
+        const guint8 *in_line = in_base + y * in_stride;
+        guint8 *out_line = out_base + y * out_stride;
+        for (gsize x = 0; x < width; x++) {
+          const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
+          guint32 idx;
+          if (G_UNLIKELY (v <= minPixelValue)) {
+            idx = 0u;
+          } else if (G_UNLIKELY (v >= maxPixelValue)) {
+            idx = 65535u;
+          } else {
+            const guint32 t = (guint32) (v - minPixelValue);
+            idx = (t * scale + (range >> 1)) / range; /* rounded */
+            if (idx > 65535u) idx = 65535u; /* safety */
+          }
+          const uint8_t *rgb = lut[idx];
+          const gsize off = 3 * x;
+          out_line[off + 0] = rgb[0];
+          out_line[off + 1] = rgb[1];
+          out_line[off + 2] = rgb[2];
+        }
+      }
+      return GST_FLOW_OK;
+    }
+
+    /* Below: GRAY8 output path (original behavior) */
     /* Fast path for the common full-range manual mapping: v >> 8 */
     if (G_LIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
       for (gsize y = 0; y < height; y++) {
@@ -448,21 +535,21 @@ gst_gray16norm_transform_caps (GstBaseTransform * trans,
 	const guint n = gst_caps_get_size (caps);
 	for (guint i = 0; i < n; i++) {
 		const GstStructure *s = gst_caps_get_structure (caps, i);
-		GstStructure *s2 = gst_structure_copy (s);
-
 		if (direction == GST_PAD_SINK) {
-			/* input describes caps for sink → return caps for src */
-			gst_structure_set (s2,
-					"format", G_TYPE_STRING, "GRAY8",
-					NULL);
-		} else {
-			/* input describes caps for src → return caps for sink */
-			gst_structure_set (s2,
-					"format", G_TYPE_STRING, "GRAY16_LE",
-					NULL);
-		}
+			/* From sink (GRAY16_LE) to src: advertise both GRAY8 and RGB */
+			GstStructure *s_gray8 = gst_structure_copy (s);
+			gst_structure_set (s_gray8, "format", G_TYPE_STRING, "GRAY8", NULL);
+			gst_caps_append_structure (result, s_gray8);
 
-		gst_caps_append_structure (result, s2);
+			GstStructure *s_rgb = gst_structure_copy (s);
+			gst_structure_set (s_rgb, "format", G_TYPE_STRING, "RGB", NULL);
+			gst_caps_append_structure (result, s_rgb);
+		} else {
+			/* From src caps to sink caps */
+			GstStructure *s2 = gst_structure_copy (s);
+			gst_structure_set (s2, "format", G_TYPE_STRING, "GRAY16_LE", NULL);
+			gst_caps_append_structure (result, s2);
+		}
 	}
 
 	if (filter) {
@@ -483,6 +570,7 @@ enum {
 	PROP_AUTO_RANGE,
 	PROP_BLACK_LEVEL,
 	PROP_WHITE_LEVEL,
+	PROP_PALETTE,
 };
 
 static void
@@ -501,6 +589,25 @@ gst_gray16norm_set_property (GObject * object, const guint prop_id,
 		case PROP_WHITE_LEVEL:
 			self->white_level = (guint16) g_value_get_uint (value);
 			break;
+		case PROP_PALETTE: {
+			const gchar *s = g_value_get_string (value);
+			if (!s) { self->palette = GST_GRAY16NORM_PALETTE_TURBO; break; }
+			if (g_ascii_strcasecmp (s, "turbo") == 0) {
+				self->palette = GST_GRAY16NORM_PALETTE_TURBO;
+			} else if (g_ascii_strcasecmp (s, "viridis") == 0 ||
+			           g_ascii_strcasecmp (s, "virdis") == 0) {
+				self->palette = GST_GRAY16NORM_PALETTE_VIRIDIS;
+			} else if (g_ascii_strcasecmp (s, "magma") == 0) {
+				self->palette = GST_GRAY16NORM_PALETTE_MAGMA;
+			} else if (g_ascii_strcasecmp (s, "jet") == 0) {
+				self->palette = GST_GRAY16NORM_PALETTE_JET;
+			} else if (g_ascii_strcasecmp (s, "prism") == 0) {
+				self->palette = GST_GRAY16NORM_PALETTE_PRISM;
+			} else {
+				GST_WARNING_OBJECT (self, "Unknown palette '%s', using turbo", s);
+				self->palette = GST_GRAY16NORM_PALETTE_TURBO;
+			}
+			break; }
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -523,6 +630,17 @@ gst_gray16norm_get_property (GObject * object, const guint prop_id,
 		case PROP_WHITE_LEVEL:
 			g_value_set_uint (value, self->white_level);
 			break;
+		case PROP_PALETTE: {
+			const gchar *name = "turbo";
+			switch (self->palette) {
+				case GST_GRAY16NORM_PALETTE_TURBO: name = "turbo"; break;
+				case GST_GRAY16NORM_PALETTE_VIRIDIS: name = "viridis"; break;
+				case GST_GRAY16NORM_PALETTE_MAGMA: name = "magma"; break;
+				case GST_GRAY16NORM_PALETTE_JET: name = "jet"; break;
+				case GST_GRAY16NORM_PALETTE_PRISM: name = "prism"; break;
+			}
+			g_value_set_string (value, name);
+			break; }
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -563,9 +681,17 @@ gst_gray16norm_class_init (GstGray16NormClass * klass)
 				0, 65535, 65535,
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+	/* Palette for RGB output (ignored when output is GRAY8) */
+	g_object_class_install_property (
+			gobject_class, PROP_PALETTE,
+			g_param_spec_string ("palette", "LUT palette for RGB",
+				"When output is RGB, select LUT palette: turbo (default), viridis (alias: virdis), magma, jet, prism",
+				"turbo",
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
 	gst_element_class_set_static_metadata (element_class,
 			"Gray16 normalizer", "Filter/Effect/Video",
-			"Normalize GRAY16 to GRAY8 with auto or manual range",
+			"Normalize GRAY16 to GRAY8 or map to RGB via LUT; auto or manual range",
 			"GstGray16Norm Authors");
 
 	gst_element_class_add_pad_template (
@@ -581,7 +707,7 @@ gst_gray16norm_class_init (GstGray16NormClass * klass)
 	bt_class->transform_caps            = gst_gray16norm_transform_caps;
 
 	GST_DEBUG_CATEGORY_INIT (gst_gray16norm_debug, "gray16norm", 0,
-			"GRAY16 to GRAY8 normalizer");
+			"GRAY16 normalizer to GRAY8 or RGB (LUT)");
 }
 
 static void
@@ -590,27 +716,7 @@ gst_gray16norm_init (GstGray16Norm * self)
 	self->auto_range  = TRUE;
 	self->black_level = 0;
 	self->white_level = 65535;
+	self->palette     = GST_GRAY16NORM_PALETTE_TURBO;
 }
 
-/* --- plugin init --- */
-
-static gboolean
-plugin_init (GstPlugin * plugin)
-{
-	return gst_element_register (plugin,
-			"gray16norm",
-			GST_RANK_NONE,
-			GST_TYPE_GRAY16NORM);
-}
-
-GST_PLUGIN_DEFINE (
-        GST_VERSION_MAJOR,
-        GST_VERSION_MINOR,
-        gray16norm,
-        "GRAY16 normalization plugin",
-        plugin_init,
-        "1.0",
-        "LGPL-2.1-or-later",
-        "GstGray16Norm",
-        "https://github.com/sanchox/gray16norm"
-        )
+/* plugin registration moved to gstgray16plugin.c */

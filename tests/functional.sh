@@ -31,14 +31,40 @@ run_pipe() {
 }
 
 # Auto mode: videotestsrc → GRAY16_LE → gray16norm → fakesink
-run_pipe "auto" \
+run_pipe "auto-gray8" \
   videotestsrc num-buffers=5 ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm ! fakesink sync=false
 
 # Manual mode: use explicit black/white levels
-run_pipe "manual" \
+run_pipe "manual-gray8" \
   videotestsrc num-buffers=5 ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false black-level=1000 white-level=20000 ! \
   fakesink sync=false
+
+# RGB output via LUT palettes (force RGB on src caps)
+run_pipe "rgb-turbo" \
+  videotestsrc num-buffers=5 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=turbo ! \
+  video/x-raw,format=RGB ! fakesink sync=false
+
+run_pipe "rgb-viridis" \
+  videotestsrc num-buffers=5 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=viridis ! \
+  video/x-raw,format=RGB ! fakesink sync=false
+
+run_pipe "rgb-magma" \
+  videotestsrc num-buffers=5 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=magma ! \
+  video/x-raw,format=RGB ! fakesink sync=false
+
+run_pipe "rgb-jet" \
+  videotestsrc num-buffers=5 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=jet ! \
+  video/x-raw,format=RGB ! fakesink sync=false
+
+run_pipe "rgb-prism" \
+  videotestsrc num-buffers=5 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=prism ! \
+  video/x-raw,format=RGB ! fakesink sync=false
 
 echo "[func] Done"

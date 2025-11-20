@@ -1,9 +1,12 @@
 # GstGray16Norm
 
-GstGray16Norm is a GStreamer 1.0 video filter plugin that converts GRAY16_LE frames to GRAY8 with normalization. It supports:
+GstGray16Norm is a GStreamer 1.0 video filter plugin that converts GRAY16_LE frames to either GRAY8 (normalized) or RGB (via palette LUT) output.
 
-- Auto range normalization: per-frame min/max mapping to 0–255.
+It supports:
+
+- Auto range normalization: per-frame min/max mapping.
 - Manual levels: map a given black-level to 0 and white-level to 255.
+- Optional RGB color mapping: after normalization to [0..65535], map values to RGB via a 65k-entry LUT with selectable color palettes.
 
 Element factory name: `gray16norm`
 
@@ -11,7 +14,7 @@ Plugin metadata (from source):
 - Version: 1.0
 - License: LGPL-2.1-or-later
 - Category: Filter/Effect/Video
-- Description: "Normalize GRAY16 to GRAY8 with auto or manual range"
+- Description: "Normalize GRAY16 to GRAY8 or map to RGB via LUT; auto or manual range"
 - Debug category: `gray16norm`
 
 ## Stack
@@ -38,6 +41,7 @@ Build-time:
 - GCC (or compatible C compiler)
 - pkg-config
 - GStreamer 1.0 development headers and libraries: `gstreamer-1.0`, `gstreamer-video-1.0`
+- Python 3 with NumPy and Matplotlib (mandatory; used to generate 65k-entry LUT headers for all palettes during build)
 
 Runtime:
 - GStreamer 1.0 core and base plugins
@@ -102,23 +106,28 @@ GST_DEBUG=gray16norm:4 gst-inspect-1.0 gray16norm
 
 ## Usage
 
-The element accepts `video/x-raw,format=GRAY16_LE` on sink and outputs `video/x-raw,format=GRAY8` on src.
+### Element: gray16norm
+
+Sink caps: `video/x-raw,format=GRAY16_LE`
+
+Src caps: `video/x-raw,format=GRAY8` or `video/x-raw,format=RGB`
 
 Properties:
-- `auto-range` (boolean, default: true) — compute per-frame min/max
-- `black-level` (uint16, default: 0) — used when `auto-range=false`
-- `white-level` (uint16, default: 65535) — used when `auto-range=false`
+- `auto-range` (boolean, default: true) — compute per-frame min/max.
+- `black-level` (uint16, default: 0) — used when `auto-range=false`.
+- `white-level` (uint16, default: 65535) — used when `auto-range=false`.
+- `palette` (string, default: `turbo`) — LUT palette to use when output format is RGB. Supported: `turbo`, `viridis` (alias: `virdis`), `magma`, `jet`, `prism`.
 
 Example pipelines (may require that your GStreamer build supports GRAY16_LE in `videoconvert`):
 
-- Auto normalization (default):
+- Auto normalization to GRAY8 (default):
 ```bash
 gst-launch-1.0 -v videotestsrc ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm ! \
   videoconvert ! autovideosink
 ```
 
-- Manual levels (map [1000, 20000] to [0, 255]):
+- Manual levels to GRAY8 (map [1000, 20000] to [0, 255]):
 ```bash
 gst-launch-1.0 -v videotestsrc ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false \
@@ -131,6 +140,73 @@ gst-launch-1.0 -v filesrc location=your_input.raw ! \
   videoparse width=<W> height=<H> format=gray16-le framerate=30/1 ! \
   gray16norm ! videoconvert ! autovideosink
 ```
+
+### RGB output via palettes (gray16norm)
+
+To produce RGB output, either let caps negotiate to RGB automatically down the stream, or force it explicitly. Examples for each palette:
+
+- Turbo (default):
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=turbo ! \
+  video/x-raw,format=RGB ! videoconvert ! autovideosink
+```
+
+- Viridis:
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=viridis ! \
+  video/x-raw,format=RGB ! videoconvert ! autovideosink
+```
+
+- Magma:
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=magma ! \
+  video/x-raw,format=RGB ! videoconvert ! autovideosink
+```
+
+- Jet:
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=jet ! \
+  video/x-raw,format=RGB ! videoconvert ! autovideosink
+```
+
+- Prism (sharper, more pronounced color bands):
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm palette=prism ! \
+  video/x-raw,format=RGB ! videoconvert ! autovideosink
+```
+
+## LUT generation
+
+All LUT headers (65,536 RGB triplets per palette) are generated automatically at build time. Generation is mandatory so that every palette is always available for RGB output in `gray16norm`.
+
+Generated files and symbols:
+- `gray16_to_rgb_lut.h` → array `gray16_to_rgb` (Turbo palette)
+- `gray16_to_rgb_lut_viridis.h` → array `gray16_to_rgb_viridis` (Viridis palette)
+- `gray16_to_rgb_lut_magma.h` → array `gray16_to_rgb_magma` (Magma palette)
+- `gray16_to_rgb_lut_jet.h` → array `gray16_to_rgb_jet` (Jet palette)
+- `gray16_to_rgb_lut_prism.h` → array `gray16_to_rgb_prism` (Prism palette; high-contrast bands)
+
+Manual regeneration (optional):
+
+```bash
+# Generate all palettes explicitly
+make generate-luts
+
+# Or generate a specific palette directly
+python3 lut_gen.py --palette viridis
+python3 lut_gen.py --palette magma
+python3 lut_gen.py --palette jet
+python3 lut_gen.py --palette prism
+```
+
+Notes:
+- Build will fail if Python 3, NumPy or Matplotlib are missing. Install them system-wide or into a virtualenv (e.g., `pip install numpy matplotlib`).
+- You can set GST_DEBUG=gray16norm:4 to see transform logs.
 
 ## Scripts and Make targets
 
@@ -157,7 +233,7 @@ Makefile targets:
 .
 ├── Makefile              # build/install targets
 ├── README.md             # this document
-├── gstgray16norm.c       # GStreamer element implementation
+├── gstgray16norm.c       # GStreamer element implementation (GRAY8 and RGB output)
 └── tests/                # lightweight shell tests
     ├── smoke.sh          # builds and runs gst-inspect-1.0 gray16norm
     └── functional.sh     # short gst-launch-1.0 pipelines (may SKIP on some systems)
@@ -176,11 +252,11 @@ Makefile targets:
 - Fixed-point instead of float on the hot path:
   - Scalar path uses Q32.32 (accuracy, portability).
   - AArch64 NEON path uses Q8 scaling with rounding (significantly faster; difference vs Q32.32 is within ±1 LSB; saturation ensures [0..255]).
-- Hardware-specific optimizations for i.MX8MP (Cortex-A53, aarch64):
+- Hardware-specific optimizations for ARM SoC (Cortex-A53, aarch64):
   - Auto min/max scan and normalization are vectorized with ARM NEON (enabled automatically on aarch64).
   - For armv7 with NEON, you may enable NEON via compiler flags (see below).
 
-Note: earlier README versions mentioned a LUT optimization and `transform_size`. They are not used in the current code. A LUT for manual mode can be added later as a separate optimization if needed.
+The RGB path applies the palette LUT to normalized 16-bit indices (0..65535) before projecting to RGB; GRAY8 path uses fixed-point scaling and SIMD where available.
 
 ## Tests
 
