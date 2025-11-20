@@ -23,7 +23,9 @@ LDLIBS      ?= $(shell $(PKG_CONFIG) --libs $(GST_DEPS)) $(SANITIZERS)
 # Install path (typical user-local)
 INSTALL_DIR ?= $(HOME)/.local/lib/gstreamer-1.0
 
-.PHONY: all clean install uninstall debug test-smoke
+.PHONY: all clean install uninstall debug \
+        test test-smoke test-functional test-all \
+        format check-format lint style
 
 all: $(TARGET)
 
@@ -51,10 +53,39 @@ debug:
 	$(MAKE) OPT=-O0 SANITIZERS="-fsanitize=address,undefined" CFLAGS+=" -g"
 
 # Simple smoke test (requires gst-inspect-1.0)
-test-smoke: all
-	@export GST_PLUGIN_PATH="$(PWD):$$GST_PLUGIN_PATH"; \
-	if command -v gst-inspect-1.0 >/dev/null; then \
-	  gst-inspect-1.0 gray16norm; \
+TESTS_DIR := tests
+
+# Test entry points
+test: test-smoke
+
+test-smoke:
+	@bash "$(TESTS_DIR)/smoke.sh"
+
+test-functional:
+	@bash "$(TESTS_DIR)/functional.sh"
+
+test-all: test-smoke test-functional
+
+# Code style helpers
+format:
+	@if command -v clang-format >/dev/null; then \
+	  clang-format -i $(SRC); \
 	else \
-	  echo "SKIP: gst-inspect-1.0 missing"; \
+	  echo "SKIP: clang-format not found"; \
 	fi
+
+check-format:
+	@if command -v clang-format >/dev/null; then \
+	  clang-format --dry-run -Werror $(SRC); \
+	else \
+	  echo "SKIP: clang-format not found"; \
+	fi
+
+lint:
+	@if command -v clang-tidy >/dev/null; then \
+	  clang-tidy $(SRC) -- $(CSTD) -fPIC $$( $(PKG_CONFIG) --cflags $(GST_DEPS) ); \
+	else \
+	  echo "SKIP: clang-tidy not found"; \
+	fi
+
+style: check-format lint

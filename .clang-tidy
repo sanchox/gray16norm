@@ -1,0 +1,19 @@
+---
+Checks: |
+  -*,
+  clang-analyzer-*,
+  bugprone-*,-bugprone-easily-swappable-parameters,
+  cert-err34-c,cert-str34-c,
+  readability-misleading-indentation,
+  readability-inconsistent-declaration-parameter-name,
+  portability-simd-intrinsics
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '.*'
+AnalyzeTemporaryDtors: false
+FormatStyle: none
+ExtraArgs:
+  - "-std=gnu11"
+  - "-Wall"
+  - "-Wextra"

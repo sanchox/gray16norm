@@ -13,6 +13,29 @@
 #include <gst/gstutils.h>
 #include <string.h>
 
+/* Use intrinsics when available (compile-time selection). */
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include <arm_neon.h>
+#define GST_GRAY16NORM_HAVE_NEON 1
+#else
+#define GST_GRAY16NORM_HAVE_NEON 0
+#endif
+
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
+/* SSE2 intrinsics for x86/x86_64 */
+#include <emmintrin.h>
+#define GST_GRAY16NORM_HAVE_SSE2 1
+#else
+#define GST_GRAY16NORM_HAVE_SSE2 0
+#endif
+
+/* GCC/Clang vector extensions (portable vector types) */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__IBMC__)
+#define GST_GRAY16NORM_HAVE_GNU_VECTOR 1
+#else
+#define GST_GRAY16NORM_HAVE_GNU_VECTOR 0
+#endif
+
 #ifndef PACKAGE
 #define PACKAGE "gray16norm"
 #endif
@@ -128,6 +151,112 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
     guint16 maxPixelValue = self->auto_range ? 0x0000 : self->white_level;
 
     if (self->auto_range) {
+#if GST_GRAY16NORM_HAVE_NEON && defined(__aarch64__)
+      /* Vectorized min/max scan across full frame */
+      uint16x8_t minValueVector = vdupq_n_u16 (0xffffu);
+      uint16x8_t maxValueVector = vdupq_n_u16 (0x0000u);
+      for (gsize y = 0; y < height; y++) {
+        const guint8 *line = in_base + y * in_stride;
+        const guint16 *line16 = (const guint16 *) line;
+        gsize x = 0;
+        const gsize w8 = width & ~(gsize)7; /* multiple of 8 */
+        for (; x < w8; x += 8) {
+          uint16x8_t v = vld1q_u16 (line16 + x);
+          minValueVector = vminq_u16 (minValueVector, v);
+          maxValueVector = vmaxq_u16 (maxValueVector, v);
+        }
+        /* tail */
+        for (; x < width; x++) {
+          const guint16 v = line16[x];
+          if (v < minPixelValue) minPixelValue = v;
+          if (v > maxPixelValue) maxPixelValue = v;
+        }
+      }
+      /* Reduce vector mins/maxs and merge with scalar tails */
+      guint16 vmin_scalar = (guint16) vminvq_u16 (minValueVector);
+      guint16 vmax_scalar = (guint16) vmaxvq_u16 (maxValueVector);
+      if (vmin_scalar < minPixelValue) minPixelValue = vmin_scalar;
+      if (vmax_scalar > maxPixelValue) maxPixelValue = vmax_scalar;
+      GST_LOG_OBJECT (self, "auto-range: NEON min=%u max=%u",
+                      (unsigned) minPixelValue, (unsigned) maxPixelValue);
+#elif GST_GRAY16NORM_HAVE_SSE2
+      /* SSE2 path: use bias-xor by 0x8000 to emulate unsigned min/max with signed ops */
+      const __m128i vbias = _mm_set1_epi16 ((short)0x8000);
+      __m128i vminx = _mm_set1_epi16 ((short)0x7FFF);   /* +32767 */
+      __m128i vmaxx = _mm_set1_epi16 ((short)0x8000);   /* -32768 */
+      for (gsize y = 0; y < height; y++) {
+        const guint8 *line = in_base + y * in_stride;
+        const guint16 *line16 = (const guint16 *) line;
+        gsize x = 0;
+        const gsize w8 = width & ~(gsize)7; /* process 8 pixels */
+        for (; x < w8; x += 8) {
+          __m128i v = _mm_loadu_si128 ((const __m128i *) (line16 + x));
+          __m128i vx = _mm_xor_si128 (v, vbias); /* bias to signed */
+          vminx = _mm_min_epi16 (vminx, vx);
+          vmaxx = _mm_max_epi16 (vmaxx, vx);
+        }
+        /* tail */
+        for (; x < width; x++) {
+          const guint16 v = line16[x];
+          if (v < minPixelValue) minPixelValue = v;
+          if (v > maxPixelValue) maxPixelValue = v;
+        }
+      }
+      /* Unbias and reduce vectors to scalars */
+      __m128i vmin = _mm_xor_si128 (vminx, vbias);
+      __m128i vmax = _mm_xor_si128 (vmaxx, vbias);
+      guint16 tmpmin[8], tmpmax[8];
+      _mm_storeu_si128 ((__m128i *) tmpmin, vmin);
+      _mm_storeu_si128 ((__m128i *) tmpmax, vmax);
+      for (int i = 0; i < 8; i++) {
+        if (tmpmin[i] < minPixelValue) minPixelValue = tmpmin[i];
+        if (tmpmax[i] > maxPixelValue) maxPixelValue = tmpmax[i];
+      }
+      GST_LOG_OBJECT (self, "auto-range: SSE2 min=%u max=%u",
+                      (unsigned) minPixelValue, (unsigned) maxPixelValue);
+#elif GST_GRAY16NORM_HAVE_GNU_VECTOR
+      /* GCC/Clang vector extensions path (vector_size(16) of u16).
+       * This path is architecture-agnostic and lets the compiler pick
+       * appropriate vector instructions where available. */
+      typedef unsigned short u16x8 __attribute__((vector_size(16)));
+      const u16x8 vmax_init = (u16x8){0,0,0,0,0,0,0,0};
+      const u16x8 vmin_init = (u16x8){0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF,0xFFFF};
+      u16x8 vminv = vmin_init;
+      u16x8 vmaxv = vmax_init;
+      for (gsize y = 0; y < height; y++) {
+        const guint8 *line = in_base + y * in_stride;
+        const guint16 *line16 = (const guint16 *) line;
+        gsize x = 0;
+        const gsize w8 = width & ~(gsize)7;
+        for (; x < w8; x += 8) {
+          /* Unaligned-safe load via memcpy to avoid strict-aliasing/alignment UB */
+          u16x8 v;
+          __builtin_memcpy(&v, line16 + x, sizeof(v));
+          u16x8 mask_lt = (u16x8) (v < vminv);
+          u16x8 mask_gt = (u16x8) (v > vmaxv);
+          /* select: new_min = mask_lt ? v : vminv */
+          vminv = (u16x8) ((vminv & ~mask_lt) | (v & mask_lt));
+          vmaxv = (u16x8) ((vmaxv & ~mask_gt) | (v & mask_gt));
+        }
+        /* tail */
+        for (; x < width; x++) {
+          const guint16 v = line16[x];
+          if (v < minPixelValue) minPixelValue = v;
+          if (v > maxPixelValue) maxPixelValue = v;
+        }
+      }
+      /* Reduce vector mins/maxs and merge with scalar tails */
+      guint16 tmpmin[8];
+      guint16 tmpmax[8];
+      __builtin_memcpy(tmpmin, &vminv, sizeof(tmpmin));
+      __builtin_memcpy(tmpmax, &vmaxv, sizeof(tmpmax));
+      for (int i = 0; i < 8; i++) {
+        if (tmpmin[i] < minPixelValue) minPixelValue = tmpmin[i];
+        if (tmpmax[i] > maxPixelValue) maxPixelValue = tmpmax[i];
+      }
+      GST_LOG_OBJECT (self, "auto-range: GNU-Vector min=%u max=%u",
+                      (unsigned) minPixelValue, (unsigned) maxPixelValue);
+#else
       for (gsize y = 0; y < height; y++) {
         const guint8 *line = in_base + y * in_stride;
         for (gsize x = 0; x < width; x++) {
@@ -136,10 +265,11 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
           if (v > maxPixelValue) maxPixelValue = v;
         }
       }
+#endif
     }
 
     /* Degenerate range: fill zeros quickly */
-    if (G_UNLIKELY (maxPixelValue <= (guint16)(minPixelValue + 1))) {
+    if (G_UNLIKELY (maxPixelValue <= minPixelValue)) {
       for (gsize y = 0; y < height; y++) {
         guint8 *out_line = out_base + y * out_stride;
         memset (out_line, 0, (size_t) width);
@@ -162,6 +292,98 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
 
     /* General path: fixed-point scaling without per-pixel division */
     const guint32 range = (guint32) (maxPixelValue - minPixelValue);
+
+#if GST_GRAY16NORM_HAVE_NEON && defined(__aarch64__)
+    /* NEON path: use Q8 factor: val = ((t * scale_q8) + 128) >> 8; then narrow/saturate */
+    const guint32 N = 255u << 8; /* 65280 */
+    const guint16 scale_q8 = (guint16) ((N + (range >> 1)) / range);
+    const uint16x8_t vmin_dup = vdupq_n_u16 ((uint16_t) minPixelValue);
+    const uint16x8_t vscale_dup = vdupq_n_u16 (scale_q8);
+    const uint16x8_t vrange_dup = vdupq_n_u16 ((uint16_t) range);
+    const uint32x4_t vround_dup = vdupq_n_u32 (128u);
+    GST_LOG_OBJECT (self, "normalize: NEON scale_q8=%u (range=%u)",
+                    (unsigned) scale_q8, (unsigned) range);
+
+    for (gsize y = 0; y < height; y++) {
+      const guint8 *in_line_u8 = in_base + y * in_stride;
+      guint8 *out_line = out_base + y * out_stride;
+      const guint16 *in_line = (const guint16 *) in_line_u8;
+      gsize x = 0;
+      const gsize w8 = width & ~(gsize)7;
+      for (; x < w8; x += 8) {
+        uint16x8_t vin = vld1q_u16 (in_line + x);
+        /* t = clamp(v - min, 0..range) */
+        uint16x8_t t = vqsubq_u16 (vin, vmin_dup);
+        t = vminq_u16 (t, vrange_dup);
+        /* 16x16 -> 32 */
+        uint32x4_t lo = vmull_u16 (vget_low_u16 (t), vget_low_u16 (vscale_dup));
+        uint32x4_t hi = vmull_u16 (vget_high_u16 (t), vget_high_u16 (vscale_dup));
+        lo = vaddq_u32 (lo, vround_dup);
+        hi = vaddq_u32 (hi, vround_dup);
+        uint16x4_t lo16 = vshrn_n_u32 (lo, 8);
+        uint16x4_t hi16 = vshrn_n_u32 (hi, 8);
+        uint16x8_t packed16 = vcombine_u16 (lo16, hi16);
+        /* narrow with saturation to [0..255] */
+        uint8x8_t packed8 = vqmovn_u16 (packed16);
+        vst1_u8 (out_line + x, packed8);
+      }
+      /* tail */
+      for (; x < width; x++) {
+        const guint16 v = in_line[x];
+        if (v <= minPixelValue) {
+          out_line[x] = 0;
+        } else if (v >= maxPixelValue) {
+          out_line[x] = 255;
+        } else {
+          const guint32 t = (guint32) (v - minPixelValue);
+          const guint32 val = (t * (guint32) scale_q8 + 128u) >> 8;
+          out_line[x] = (val > 255u) ? 255u : (guint8) val;
+        }
+      }
+    }
+#elif GST_GRAY16NORM_HAVE_SSE2
+    /* SSE2 path: Q16 scaling with pmulhuw, clamp t in [0..range] using unsigned saturating ops */
+    const guint16 scale_q16 = (guint16) (((255u << 16) + (range >> 1)) / range);
+    const __m128i vmin_dup = _mm_set1_epi16 ((short) minPixelValue);
+    const __m128i vrange_dup = _mm_set1_epi16 ((short) range);
+    const __m128i vscale_dup = _mm_set1_epi16 ((short) scale_q16);
+    const __m128i vzero = _mm_setzero_si128 ();
+    GST_LOG_OBJECT (self, "normalize: SSE2 scale_q16=%u (range=%u)",
+                    (unsigned) scale_q16, (unsigned) range);
+
+    for (gsize y = 0; y < height; y++) {
+      const guint8 *in_line_u8 = in_base + y * in_stride;
+      guint8 *out_line = out_base + y * out_stride;
+      const guint16 *in_line = (const guint16 *) in_line_u8;
+      gsize x = 0;
+      const gsize w8 = width & ~(gsize)7;
+      for (; x < w8; x += 8) {
+        __m128i vin = _mm_loadu_si128 ((const __m128i *) (in_line + x));
+        /* t = clamp(v - min, 0..range) */
+        __m128i t = _mm_subs_epu16 (vin, vmin_dup);              /* saturating unsigned subtract */
+        __m128i over = _mm_subs_epu16 (t, vrange_dup);            /* over = max(t - range, 0) */
+        t = _mm_sub_epi16 (t, over);                              /* t = min(t, range) */
+        /* Multiply by scale_q16 and keep high 16 bits (>> 16) */
+        __m128i prod_hi = _mm_mulhi_epu16 (t, vscale_dup);        /* unsigned high half */
+        /* Narrow to 8-bit with saturation (values are 0..255 already) */
+        __m128i bytes = _mm_packus_epi16 (prod_hi, vzero);
+        _mm_storel_epi64 ((__m128i *) (out_line + x), bytes);     /* store 8 bytes */
+      }
+      /* tail */
+      for (; x < width; x++) {
+        const guint16 v = in_line[x];
+        if (v <= minPixelValue) {
+          out_line[x] = 0;
+        } else if (v >= maxPixelValue) {
+          out_line[x] = 255;
+        } else {
+          const guint32 t = (guint32) (v - minPixelValue);
+          const guint32 val = (t * (guint32) scale_q16) >> 16; /* already rounded in scale */
+          out_line[x] = (val > 255u) ? 255u : (guint8) val;
+        }
+      }
+    }
+#else
     const guint64 scale_fp = (((guint64)255) << 32) / range; /* Q32.32 */
     const guint64 bias = (1ULL << 31); /* half-up rounding */
 
@@ -182,6 +404,7 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         }
       }
     }
+#endif
 
     return GST_FLOW_OK;
 }

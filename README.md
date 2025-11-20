@@ -21,6 +21,17 @@ Plugin metadata (from source):
 - Build system: Makefile (gcc + pkg-config)
 - Package manager(s): system packages via apt (example below)
 
+### SIMD/vectorization
+
+The filter provides multiple accelerated implementations, selected at compile time/runtime by the compiler and target:
+
+- AArch64 NEON: hand-written intrinsics for min/max scanning and normalization.
+- x86/x86_64 SSE2: hand-written intrinsics for min/max scanning and normalization.
+- GCC/Clang Vector Extensions: a portable `vector_size(16)` path for auto min/max scanning that lets the compiler generate appropriate vector instructions for the target when possible. If hardware/flags do not support vectorization, the compiler may scalarize the code while keeping it correct.
+- Scalar fallback: always available.
+
+Priority of paths: NEON → SSE2 → GNU Vector Extensions → scalar.
+
 ## Requirements
 
 Build-time:
@@ -129,7 +140,10 @@ Makefile targets:
 - `uninstall`: remove the installed `.so` from that directory
 - `clean`: remove objects and outputs
 - `debug`: rebuild with ASan/UBSan and debug info
-- `test-smoke`: build and run `gst-inspect-1.0 gray16norm` with `GST_PLUGIN_PATH` pointing to the repo
+- `test`: run the smoke test (see tests/smoke.sh)
+- `test-smoke`: run the smoke test explicitly
+- `test-functional`: run short gst-launch-1.0 pipelines (best-effort)
+- `test-all`: run both smoke and functional tests
 
 ## Environment variables
 
@@ -141,31 +155,77 @@ Makefile targets:
 
 ```
 .
-├── Makefile            # build/install targets
-├── README.md           # this document
-└── gstgray16norm.c     # GStreamer element implementation
+├── Makefile              # build/install targets
+├── README.md             # this document
+├── gstgray16norm.c       # GStreamer element implementation
+└── tests/                # lightweight shell tests
+    ├── smoke.sh          # builds and runs gst-inspect-1.0 gray16norm
+    └── functional.sh     # short gst-launch-1.0 pipelines (may SKIP on some systems)
 ```
 
 ## Conventions
 
 - All source code comments and commit messages should be written in English.
-- Follow the existing code style; see `.editorconfig` and `.clang-format` for formatting rules.
+- Follow the existing code style; see `.editorconfig` and `.clang-format` for formatting rules. Indentation: 2 spaces, no tabs (except Makefile).
+
+## Performance and optimizations
+
+- Two-pass, allocation-free algorithm:
+  - Auto mode (default): first pass finds min/max, second pass normalizes.
+  - Manual mode: full-range [0, 65535] uses a fast path `v >> 8`.
+- Fixed-point instead of float on the hot path:
+  - Scalar path uses Q32.32 (accuracy, portability).
+  - AArch64 NEON path uses Q8 scaling with rounding (significantly faster; difference vs Q32.32 is within ±1 LSB; saturation ensures [0..255]).
+- Hardware-specific optimizations for i.MX8MP (Cortex-A53, aarch64):
+  - Auto min/max scan and normalization are vectorized with ARM NEON (enabled automatically on aarch64).
+  - For armv7 with NEON, you may enable NEON via compiler flags (see below).
+
+Note: earlier README versions mentioned a LUT optimization and `transform_size`. They are not used in the current code. A LUT for manual mode can be added later as a separate optimization if needed.
 
 ## Tests
 
-No automated tests are included yet.
+This repo contains small, hermetic shell tests under `tests/`:
 
-Suggested next steps:
-- Add a simple CI smoke test that builds the plugin and runs `gst-inspect-1.0 gray16norm` with `GST_PLUGIN_PATH=$PWD`.
-- Add functional tests that run short `gst-launch-1.0` pipelines verifying caps and basic behavior.
+- Smoke test: verifies discovery via gst-inspect-1.0
+  - `make test` or `make test-smoke`
+  - Does: builds the plugin, sets `GST_PLUGIN_PATH` to the repo root, runs `gst-inspect-1.0 gray16norm`.
+- Functional tests: short pipelines with `gst-launch-1.0` (best-effort)
+  - `make test-functional`
+  - Note: some environments cannot negotiate `GRAY16_LE` with `videoconvert` — such cases are treated as SKIP, not a failure.
+- All tests: `make test-all`
+
+Environment isolation:
+- Tests do not install the plugin system-wide; they export `GST_PLUGIN_PATH` to point at the repository root.
+
+## NEON build notes
+
+- aarch64 (e.g., i.MX8): NEON is mandatory and enabled by default; no extra flags are required.
+- armv7 (32-bit ARM): ensure the compiler enables NEON, for example:
+  ```bash
+  make CFLAGS+=" -mfpu=neon -mfloat-abi=hard "
+  ```
+  If NEON is not available, the plugin automatically falls back to the scalar path.
+
+## Code style and linters
+
+This project follows common GStreamer C conventions. We approximate gst-indent formatting via clang-format using a GNU-like profile with 2-space indentation.
+
+- Formatting:
+  - Configuration: `.clang-format` (GNU-like, 2 spaces), `.editorconfig` (LF, final newline, 2 spaces; Makefile uses tabs).
+  - Commands:
+    - `make format` — format sources using clang-format.
+    - `make check-format` — verify formatting without modifying files.
+- Linting:
+  - Configuration: `.clang-tidy` tuned for C (clang-analyzer, bugprone, cert C checks).
+  - Command: `make lint` — runs clang-tidy with pkg-config CFLAGS for GStreamer.
+- Combined:
+  - `make style` — runs format check and lint.
+
+Important: All source code comments, commit messages, and this README must be written in English only.
 
 ## License
 
-License: LGPL-2.1-or-later (see source headers and `GST_PLUGIN_DEFINE`).
-
-TODO:
-- Include a `LICENSE` file in the repository.
-- Fill in accurate author/maintainer and project URL (placeholders present in source).
+License: LGPL-2.1-or-later (see source headers, `GST_PLUGIN_DEFINE`, and the `LICENSE` file).
 
 ## Notes and Caveats
 
