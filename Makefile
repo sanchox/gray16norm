@@ -23,7 +23,12 @@ WARN        ?= -Wall -Wextra -Wformat=2 -Wshadow -Wpointer-arith -Wcast-qual -Wn
 OPT         ?= -O2
 SANITIZERS  ?=
 
-CFLAGS      ?= $(CSTD) $(WARN) $(OPT) -fPIC $(shell $(PKG_CONFIG) --cflags $(GST_DEPS))
+GST_CFLAGS  ?= $(shell $(PKG_CONFIG) --cflags $(GST_DEPS))
+
+# Base CFLAGS can be overridden by environments like Yocto, but we always append
+# pkg-config derived includes to avoid losing required headers.
+CFLAGS      ?= $(CSTD) $(WARN) $(OPT) -fPIC
+CFLAGS      += $(GST_CFLAGS)
 CFLAGS      += $(SANITIZERS)
 LDFLAGS     ?=
 LDLIBS      ?= $(shell $(PKG_CONFIG) --libs $(GST_DEPS)) $(SANITIZERS)
@@ -101,7 +106,7 @@ check-format:
 
 lint:
 	@if command -v clang-tidy >/dev/null; then \
-	  clang-tidy $(SRC) -- $(CSTD) -fPIC $$( $(PKG_CONFIG) --cflags $(GST_DEPS) ); \
+	  clang-tidy $(SRC) -- $(CSTD) -fPIC $$($(PKG_CONFIG) --cflags $(GST_DEPS)); \
 	else \
 	  echo "SKIP: clang-tidy not found"; \
 	fi

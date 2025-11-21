@@ -319,7 +319,7 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         default:                              lut = gray16_to_rgb; break;
       }
 
-      if (G_LIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
+      if (G_UNLIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
         /* Full-range manual mapping: index == v */
         for (gsize y = 0; y < height; y++) {
           const guint8 *in_line = in_base + y * in_stride;
