@@ -180,6 +180,28 @@ gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
   video/x-raw,format=RGB ! videoconvert ! autovideosink
 ```
 
+### Element: gray16window
+
+`gray16window` extracts an 8‑bit window from 16‑bit grayscale by detecting the most significant changing bit across the frame and right‑shifting all pixels so that up to 8 informative bits remain. This is useful when the signal occupies only a narrow bit range but you want a quick GRAY8 view without choosing manual levels.
+
+Caps:
+- Sink: `video/x-raw,format=GRAY16_LE`
+- Src: `video/x-raw,format=GRAY8`
+
+Example pipelines:
+
+- Quick preview from a synthetic source (may depend on your `videoconvert` supporting GRAY16_LE):
+```bash
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16window ! \
+  videoconvert ! autovideosink
+```
+
+Enable element‑specific logs if needed:
+```bash
+GST_DEBUG=gray16window:4 gst-inspect-1.0 gray16window
+```
+
 ## LUT generation
 
 All LUT headers (65,536 RGB triplets per palette) are generated automatically at build time. Generation is mandatory so that every palette is always available for RGB output in `gray16norm`.
