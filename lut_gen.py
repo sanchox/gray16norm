@@ -7,7 +7,7 @@ def generate_one(colormap: str, filename: str, symbol: str) -> None:
     N = 65536
     t = np.linspace(0.0, 1.0, N, dtype=np.float64)
     cmap = plt.get_cmap(colormap)
-    # cmap(t) -> (R,G,B,A) в [0..1]
+    # cmap(t) -> (R,G,B,A) in [0..1]
     rgba = cmap(t)
     rgb = (rgba[:, :3] * 255.0 + 0.5).astype(np.uint8)
 

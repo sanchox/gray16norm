@@ -3,7 +3,7 @@ PKG_CONFIG  ?= pkg-config
 
 # Plugin name (output .so)
 TARGET      ?= libgstgray16norm.so
-SRC         := gstgray16norm.c gstgray16plugin.c
+SRC         := gstgray16norm.c gstgray16window.c gstgray16plugin.c
 OBJ         := $(SRC:.c=.o)
 
 # Mandatory LUT headers (generated at build time)

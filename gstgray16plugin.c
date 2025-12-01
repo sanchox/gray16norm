@@ -16,6 +16,7 @@
 
 /* Elements implemented in other translation units */
 extern GType gst_gray16norm_get_type (void);
+extern GType gst_gray16window_get_type (void);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -24,6 +25,8 @@ plugin_init (GstPlugin * plugin)
 
   ok &= gst_element_register (plugin, "gray16norm", GST_RANK_NONE,
                               gst_gray16norm_get_type());
+  ok &= gst_element_register (plugin, "gray16window", GST_RANK_NONE,
+                              gst_gray16window_get_type());
   return ok;
 }
 
