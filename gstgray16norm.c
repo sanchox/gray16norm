@@ -296,10 +296,17 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
       /* Helper lambdas (C99 inline) for writing one pixel */
       #define PACK_RGB(r,g,b)   do { out_line[off+0]=(r); out_line[off+1]=(g); out_line[off+2]=(b); } while(0)
       #define PACK_BGR(r,g,b)   do { out_line[off+0]=(b); out_line[off+1]=(g); out_line[off+2]=(r); } while(0)
-      #define PACK_RGBX(r,g,b)  ((guint32)(((guint32)(r)<<16)|((guint32)(g)<<8)|((guint32)(b))))
-      #define PACK_BGRX(r,g,b)  ((guint32)(((guint32)(b)<<16)|((guint32)(g)<<8)|((guint32)(r))))
-      #define PACK_RGBA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(r)<<16)|((guint32)(g)<<8)|((guint32)(b))))
-      #define PACK_BGRA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(b)<<16)|((guint32)(g)<<8)|((guint32)(r))))
+      /* For 32-bit formats, pack values so that in LITTLE-ENDIAN memory
+       * the byte layout matches GStreamer expectations:
+       *   RGBx: [R][G][B][X]
+       *   BGRx: [B][G][R][X]
+       *   RGBA: [R][G][B][A]
+       *   BGRA: [B][G][R][A]
+       */
+      #define PACK_RGBX(r,g,b)  ((guint32)(((guint32)(r)) | ((guint32)(g) << 8) | ((guint32)(b) << 16)))
+      #define PACK_BGRX(r,g,b)  ((guint32)(((guint32)(b)) | ((guint32)(g) << 8) | ((guint32)(r) << 16)))
+      #define PACK_RGBA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(r)) | ((guint32)(g) << 8) | ((guint32)(b) << 16)))
+      #define PACK_BGRA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(b)) | ((guint32)(g) << 8) | ((guint32)(r) << 16)))
 
       /* Fast path: full range manual mapping (index == v) */
       if (G_UNLIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
