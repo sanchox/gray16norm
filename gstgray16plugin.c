@@ -17,6 +17,7 @@
 /* Elements implemented in other translation units */
 extern GType gst_gray16norm_get_type (void);
 extern GType gst_gray16window_get_type (void);
+extern GType gst_gray16color_get_type (void);
 
 static gboolean
 plugin_init (GstPlugin * plugin)
@@ -27,6 +28,8 @@ plugin_init (GstPlugin * plugin)
                               gst_gray16norm_get_type());
   ok &= gst_element_register (plugin, "gray16window", GST_RANK_NONE,
                               gst_gray16window_get_type());
+  ok &= gst_element_register (plugin, "gray16color", GST_RANK_NONE,
+                              gst_gray16color_get_type());
   return ok;
 }
 
@@ -34,10 +37,10 @@ GST_PLUGIN_DEFINE (
     GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
     gray16norm,
-    "GRAY16 normalization plugin",
+    "GRAY16 transformation plugin",
     plugin_init,
     "1.0",
-    "LGPL-2.1-or-later",
-    "GstGray16Norm",
+    "LGPL",
+    "gray16norm",
     "https://github.com/sanchox/gray16norm"
 )

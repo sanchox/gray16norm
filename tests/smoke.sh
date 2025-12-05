@@ -22,3 +22,8 @@ if ! gst-inspect-1.0 gray16norm >/dev/null 2>&1; then
   echo "[smoke] Hint: ensure GST_PLUGIN_PATH includes the repo root: $PWD"
   echo "[smoke] Current GST_PLUGIN_PATH: ${GST_PLUGIN_PATH:-<unset>}"
 fi
+
+echo "[smoke] Running: gst-inspect-1.0 gray16color"
+if ! gst-inspect-1.0 gray16color >/dev/null 2>&1; then
+  echo "[smoke] NOTE: element 'gray16color' not discoverable in this environment"
+fi

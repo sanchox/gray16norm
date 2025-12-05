@@ -3,7 +3,7 @@ PKG_CONFIG  ?= pkg-config
 
 # Plugin name (output .so)
 TARGET      ?= libgstgray16norm.so
-SRC         := gstgray16norm.c gstgray16window.c gstgray16plugin.c
+SRC         := gstgray16norm.c gstgray16window.c gstgray16color.c gstgray16plugin.c
 OBJ         := $(SRC:.c=.o)
 
 # Mandatory LUT headers (generated at build time)
@@ -25,7 +25,7 @@ SANITIZERS  ?=
 
 GST_CFLAGS  ?= $(shell $(PKG_CONFIG) --cflags $(GST_DEPS))
 
-# Base CFLAGS can be overridden by environments like Yocto, but we always append
+# Base CFLAGS can be overridden by environments, but we always append
 # pkg-config derived includes to avoid losing required headers.
 CFLAGS      ?= $(CSTD) $(WARN) $(OPT) -fPIC
 CFLAGS      += $(GST_CFLAGS)
@@ -36,7 +36,7 @@ LDLIBS      ?= $(shell $(PKG_CONFIG) --libs $(GST_DEPS)) $(SANITIZERS)
 # Optional ARM tuning (safe defaults; can be overridden by environment)
 ARCH        ?= $(shell uname -m)
 ifeq ($(ARCH),aarch64)
-# i.MX8MP (Cortex-A53) baseline has NEON; enable reasonable tuning
+# On aarch64 (ARMv8-A) NEON is baseline; enable reasonable tuning
 CFLAGS      += -march=armv8-a+simd -mtune=cortex-a53
 endif
 
@@ -56,8 +56,9 @@ $(TARGET): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Ensure LUTs are present before compiling element that uses them
+# Ensure LUTs are present before compiling elements that use them
 gstgray16norm.o: $(LUT_HEADERS)
+gstgray16color.o: $(LUT_HEADERS)
 
 # Generate all LUT headers when any is missing or older than lut_gen.py
 $(LUT_HEADERS): lut_gen.py
@@ -68,7 +69,7 @@ install: $(TARGET)
 	@echo "Installing to $(INSTALL_DIR)..."
 	install -d "$(INSTALL_DIR)"
 	install -m 0644 "$(TARGET)" "$(INSTALL_DIR)/"
-	@echo "Done. You may need: export GST_PLUGIN_PATH=\"$(INSTALL_DIR):$$GST_PLUGIN_PATH\""
+	@echo "Done. You may need: export GST_PLUGIN_PATH=\"$(INSTALL_DIR)\""
 
 uninstall:
 	$(RM) -f "$(INSTALL_DIR)/$(TARGET)"

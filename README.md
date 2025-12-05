@@ -1,196 +1,101 @@
-# GstGray16Norm
+### GstGray16Norm — GStreamer 1.0 plugin for 16‑bit grayscale normalization and coloring
 
-GstGray16Norm is a GStreamer 1.0 video filter plugin that converts GRAY16_LE frames to either GRAY8 (normalized) or RGB (via palette LUT) output.
+This repository provides a GStreamer plugin with elements to normalize 16‑bit grayscale video to GRAY8 and to map 16‑bit grayscale to RGB using palette LUTs.
 
-It supports:
+## Quick start
 
-- Auto range normalization: per-frame min/max mapping.
-- Manual levels: map a given black-level to 0 and white-level to 255.
-- Optional RGB color mapping: after normalization to [0..65535], map values to RGB via a 65k-entry LUT with selectable color palettes.
-
-Element factory name: `gray16norm`
-
-Plugin metadata (from source):
-- Version: 1.0
-- License: LGPL-2.1-or-later
-- Category: Filter/Effect/Video
-- Description: "Normalize GRAY16 to GRAY8 or map to RGB via LUT; auto or manual range"
-- Debug category: `gray16norm`
-
-## Stack
-
-- Language: C
-- Framework: GStreamer 1.0 (gst-video, gst-base)
-- Build system: Makefile (gcc + pkg-config)
-- Package manager(s): system packages via apt (example below)
-
-### SIMD/vectorization
-
-The filter provides multiple accelerated implementations, selected at compile time/runtime by the compiler and target:
-
-- AArch64 NEON: hand-written intrinsics for min/max scanning and normalization.
-- x86/x86_64 SSE2: hand-written intrinsics for min/max scanning and normalization.
-- GCC/Clang Vector Extensions: a portable `vector_size(16)` path for auto min/max scanning that lets the compiler generate appropriate vector instructions for the target when possible. If hardware/flags do not support vectorization, the compiler may scalarize the code while keeping it correct.
-- Scalar fallback: always available.
-
-Priority of paths: NEON → SSE2 → GNU Vector Extensions → scalar.
-
-## Requirements
-
-Build-time:
-- GCC (or compatible C compiler)
-- pkg-config
-- GStreamer 1.0 development headers and libraries: `gstreamer-1.0`, `gstreamer-video-1.0`
-- Python 3 with NumPy and Matplotlib (mandatory; used to generate 65k-entry LUT headers for all palettes during build)
-
-Runtime:
-- GStreamer 1.0 core and base plugins
-
-Debian/Ubuntu:
-```bash
-sudo apt update
-sudo apt install build-essential pkg-config \
-    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-    gstreamer1.0-plugins-base gstreamer1.0-tools
-```
-
-## Build
-
-The project is built into a shared object GStreamer plugin `libgstgray16norm.so`.
+Build and run a simple preview pipeline:
 
 ```bash
-make            # builds libgstgray16norm.so
-make clean      # removes objects and the built .so
-make debug      # rebuilds with -O0 -g and ASan/UBSan
-```
-
-## Install
-
-By default, `make install` installs the plugin to a user-local directory:
-
-- Install dir (from Makefile): `~/.local/lib/gstreamer-1.0`
-
-```bash
-make install
-```
-
-GStreamer may not scan your user-local install dir by default. If `gst-inspect-1.0 gray16norm` cannot find the element after installing, set `GST_PLUGIN_PATH` to include that directory:
-
-```bash
-export GST_PLUGIN_PATH="$HOME/.local/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-```
-
-Uninstall:
-```bash
-make uninstall
-```
-
-## Verify installation and quick smoke test
-
-Quick smoke test without installing (uses the build dir):
-```bash
-make -s clean && make -s
+make
 export GST_PLUGIN_PATH="$PWD${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
-gst-inspect-1.0 gray16norm
+gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm ! videoconvert ! autovideosink
 ```
 
-Alternatively, use the Make target:
-```bash
-make test-smoke
-```
+Manual levels example (normalized GRAY8 via fixed range):
 
-Enable debug logs for this plugin:
-```bash
-GST_DEBUG=gray16norm:4 gst-inspect-1.0 gray16norm
-```
-
-## Usage
-
-### Element: gray16norm
-
-Sink caps: `video/x-raw,format=GRAY16_LE`
-
-Src caps: `video/x-raw,format=GRAY8` or `video/x-raw,format=RGB`
-
-Properties:
-- `auto-range` (boolean, default: true) — compute per-frame min/max.
-- `black-level` (uint16, default: 0) — used when `auto-range=false`.
-- `white-level` (uint16, default: 65535) — used when `auto-range=false`.
-- `palette` (string, default: `turbo`) — LUT palette to use when output format is RGB. Supported: `turbo`, `viridis` (alias: `virdis`), `magma`, `jet`, `prism`.
-
-Example pipelines (may require that your GStreamer build supports GRAY16_LE in `videoconvert`):
-
-- Auto normalization to GRAY8 (default):
-```bash
-gst-launch-1.0 -v videotestsrc ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm ! \
-  videoconvert ! autovideosink
-```
-
-- Manual levels to GRAY8 (map [1000, 20000] to [0, 255]):
 ```bash
 gst-launch-1.0 -v videotestsrc ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false \
   black-level=1000 white-level=20000 ! videoconvert ! autovideosink
 ```
 
-If you need to test with a file that contains 16-bit grayscale frames, adjust the caps accordingly, for example:
+Play from a raw 16‑bit file:
+
 ```bash
 gst-launch-1.0 -v filesrc location=your_input.raw ! \
   videoparse width=<W> height=<H> format=gray16-le framerate=30/1 ! \
   gray16norm ! videoconvert ! autovideosink
 ```
 
-### RGB output via palettes (gray16norm)
+## Elements
 
-To produce RGB output, either let caps negotiate to RGB automatically down the stream, or force it explicitly. Examples for each palette:
+### gray16norm (normalize GRAY16_LE to GRAY8 or color using a palette)
 
-- Turbo (default):
+- Sink caps: `video/x-raw,format=GRAY16_LE`
+- Src caps:
+  - `video/x-raw,format=GRAY8`
+  - `video/x-raw,format={ RGBx, BGRx, RGBA, BGRA, RGB16, BGR16, RGB15 }`
+
+Key properties:
+- `auto-range` (bool, default: true) — per‑frame min/max auto scaling.
+- `black-level`/`white-level` (uint) — manual scaling window when `auto-range=false`.
+- `palette` (string, default: `turbo`) — one of: `turbo`, `viridis`, `magma`, `jet`, `prism` (applies to RGB output modes).
+- `alpha` (uint, 0..255, default: 255) — used for `RGBA/BGRA`.
+
+Colorized output example (per‑frame auto range, RGBx):
+
 ```bash
-gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=turbo ! \
-  video/x-raw,format=RGB ! videoconvert ! autovideosink
-```
-
-- Viridis:
-```bash
-gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
+gst-launch-1.0 -v videotestsrc ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm palette=viridis ! \
-  video/x-raw,format=RGB ! videoconvert ! autovideosink
+  video/x-raw,format=RGBx ! fakesink sync=false
 ```
 
-- Magma:
+Manual levels, BGR output:
+
+```bash
+gst-launch-1.0 -v videotestsrc ! videoconvert ! \
+  video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false black-level=1000 white-level=20000 palette=turbo ! \
+  video/x-raw,format=BGR ! fakesink sync=false
+```
+
+### gray16color (direct Gray16 → RGB via LUT, without normalization)
+
+Direct table mapping `dst = LUT[src16]` using a 65,536‑entry palette LUT, packed into the selected output format.
+
+- Sink caps: `video/x-raw,format=GRAY16_LE`
+- Src caps: `video/x-raw,format={ RGBx, BGRx, RGBA, BGRA, RGB16, BGR16, RGB15 }`
+
+Properties:
+- `palette` (string, default: `turbo`) — `turbo`, `viridis`, `magma`, `jet`, `prism`.
+- `alpha` (uint, 0..255, default: 255) — for `RGBA/BGRA`.
+
+Examples:
+- RGBx (fast path on many platforms):
 ```bash
 gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=magma ! \
-  video/x-raw,format=RGB ! videoconvert ! autovideosink
+  video/x-raw,format=GRAY16_LE ! gray16color palette=viridis ! \
+  video/x-raw,format=RGBx ! fakesink sync=false
 ```
-
-- Jet:
+- BGR16 (RGB565):
 ```bash
 gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=jet ! \
-  video/x-raw,format=RGB ! videoconvert ! autovideosink
+  video/x-raw,format=GRAY16_LE ! gray16color palette=turbo ! \
+  video/x-raw,format=BGR16 ! fakesink sync=false
 ```
 
-- Prism (sharper, more pronounced color bands):
-```bash
-gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=prism ! \
-  video/x-raw,format=RGB ! videoconvert ! autovideosink
-```
+Note on H.264/H.265 encoders: many HW encoders expect YUV (`NV12/NV21/I420`). Use `gray16color` → `videoconvert` to convert RGBx/BGRx to the required YUV format.
 
-### Element: gray16window
+### gray16window (bit‑window to GRAY8)
 
-`gray16window` extracts an 8‑bit window from 16‑bit grayscale by detecting the most significant changing bit across the frame and right‑shifting all pixels so that up to 8 informative bits remain. This is useful when the signal occupies only a narrow bit range but you want a quick GRAY8 view without choosing manual levels.
+`gray16window` extracts an 8‑bit window from 16‑bit grayscale by detecting the most significant changing bit across the frame and right‑shifting all pixels so that up to 8 informative bits remain. Useful when the signal occupies a narrow bit range and you want a quick GRAY8 view without choosing manual levels.
 
-Caps:
-- Sink: `video/x-raw,format=GRAY16_LE`
-- Src: `video/x-raw,format=GRAY8`
+- Sink caps: `video/x-raw,format=GRAY16_LE`
+- Src caps: `video/x-raw,format=GRAY8`
 
-Example pipelines:
+Example:
 
-- Quick preview from a synthetic source (may depend on your `videoconvert` supporting GRAY16_LE):
 ```bash
 gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16window ! \
@@ -198,28 +103,26 @@ gst-launch-1.0 -v videotestsrc num-buffers=30 ! videoconvert ! \
 ```
 
 Enable element‑specific logs if needed:
+
 ```bash
 GST_DEBUG=gray16window:4 gst-inspect-1.0 gray16window
 ```
 
 ## LUT generation
 
-All LUT headers (65,536 RGB triplets per palette) are generated automatically at build time. Generation is mandatory so that every palette is always available for RGB output in `gray16norm`.
+LUT headers (65,536 RGB triplets per palette) are generated automatically at build time. This ensures all palettes are available for RGB output.
 
 Generated files and symbols:
-- `gray16_to_rgb_lut.h` → array `gray16_to_rgb` (Turbo palette)
-- `gray16_to_rgb_lut_viridis.h` → array `gray16_to_rgb_viridis` (Viridis palette)
-- `gray16_to_rgb_lut_magma.h` → array `gray16_to_rgb_magma` (Magma palette)
-- `gray16_to_rgb_lut_jet.h` → array `gray16_to_rgb_jet` (Jet palette)
-- `gray16_to_rgb_lut_prism.h` → array `gray16_to_rgb_prism` (Prism palette; high-contrast bands)
+- `gray16_to_rgb_lut.h` → `gray16_to_rgb` (Turbo)
+- `gray16_to_rgb_lut_viridis.h` → `gray16_to_rgb_viridis` (Viridis)
+- `gray16_to_rgb_lut_magma.h` → `gray16_to_rgb_magma` (Magma)
+- `gray16_to_rgb_lut_jet.h` → `gray16_to_rgb_jet` (Jet)
+- `gray16_to_rgb_lut_prism.h` → `gray16_to_rgb_prism` (Prism; high‑contrast bands)
 
 Manual regeneration (optional):
 
 ```bash
-# Generate all palettes explicitly
-make generate-luts
-
-# Or generate a specific palette directly
+make generate-luts            # all palettes
 python3 lut_gen.py --palette viridis
 python3 lut_gen.py --palette magma
 python3 lut_gen.py --palette jet
@@ -227,27 +130,64 @@ python3 lut_gen.py --palette prism
 ```
 
 Notes:
-- Build will fail if Python 3, NumPy or Matplotlib are missing. Install them system-wide or into a virtualenv (e.g., `pip install numpy matplotlib`).
-- You can set GST_DEBUG=gray16norm:4 to see transform logs.
+- The build requires Python 3, NumPy, and Matplotlib. Install system‑wide or in a venv (e.g., `pip install numpy matplotlib`).
+- Set `GST_DEBUG=gray16norm:4` to see transform logs.
 
-## Scripts and Make targets
+## Build and install
 
-Makefile targets:
-- `all` (default): build the plugin
-- `install`: install the `.so` to `~/.local/lib/gstreamer-1.0`
-- `uninstall`: remove the installed `.so` from that directory
-- `clean`: remove objects and outputs
-- `debug`: rebuild with ASan/UBSan and debug info
-- `test`: run the smoke test (see tests/smoke.sh)
-- `test-smoke`: run the smoke test explicitly
-- `test-functional`: run short gst-launch-1.0 pipelines (best-effort)
-- `test-all`: run both smoke and functional tests
+Dependencies: GStreamer 1.0 and gstreamer‑video 1.0 development packages.
+
+```bash
+make                  # builds libgstgray16norm.so in the repo root
+make install          # installs to $HOME/.local/lib/gstreamer-1.0 (default)
+make uninstall        # removes the installed .so
+make clean            # removes objects and outputs
+make debug            # rebuild with ASan/UBSan and debug info
+```
+
+If GStreamer does not discover the plugin, set:
+
+```bash
+export GST_PLUGIN_PATH="$PWD${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+# For installed plugin:
+export GST_PLUGIN_PATH="$HOME/.local/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"
+```
+
+## Tests
+
+Lightweight shell tests live under `tests/` and avoid system‑wide install by exporting `GST_PLUGIN_PATH` to the repository root.
+
+- `make test` / `make test-smoke` — build and run `gst-inspect-1.0 gray16norm`
+- `make test-functional` — short `gst-launch-1.0` pipelines (best‑effort; may SKIP if caps negotiation for `GRAY16_LE` is unavailable)
+- `make test-all` — run both
+
+## SIMD backends and performance
+
+Two portable acceleration paths are used:
+- GNU Vector Extensions (GCC/Clang `vector_size` types) — default on x86 and non‑NEON targets.
+- ARM NEON (aarch64/ARMv8).
+
+Implementation notes:
+- Two‑pass, allocation‑free algorithm in auto mode (min/max then normalize).
+- Manual mode full‑range [0, 65535] uses a fast path `v >> 8`.
+- Fixed‑point scaling on hot paths: scalar Q32.32; NEON path uses Q8 scaling with rounding (within ±1 LSB; saturates to [0..255]).
+
+## NEON build notes
+
+- aarch64: NEON is enabled by default; no extra flags required.
+- armv7 (32‑bit): enable NEON if available, for example:
+
+```bash
+make CFLAGS+=" -mfpu=neon -mfloat-abi=hard "
+```
+
+If NEON is unavailable, the plugin falls back to scalar paths automatically.
 
 ## Environment variables
 
-- `GST_PLUGIN_PATH` — ensure it includes the build dir or the install directory if GStreamer does not find the plugin automatically.
-- `GST_DEBUG` — set to `gray16norm:LEVEL` (e.g., `gray16norm:4`) to see plugin logs.
-- Optional: `GST_DEBUG_FILE=debug.log` to write logs into a file.
+- `GST_PLUGIN_PATH` — include the build dir or install dir so GStreamer finds the plugin.
+- `GST_DEBUG` — set to `gray16norm:LEVEL` (e.g., `gray16norm:4`) for plugin logs.
+- Optional: `GST_DEBUG_FILE=debug.log` to save logs to a file.
 
 ## Project structure
 
@@ -255,86 +195,49 @@ Makefile targets:
 .
 ├── Makefile              # build/install targets
 ├── README.md             # this document
-├── gstgray16norm.c       # GStreamer element implementation (GRAY8 and RGB output)
-└── tests/                # lightweight shell tests
-    ├── smoke.sh          # builds and runs gst-inspect-1.0 gray16norm
-    └── functional.sh     # short gst-launch-1.0 pipelines (may SKIP on some systems)
+├── gstgray16norm.c       # GRAY8 and RGB output implementation
+├── gstgray16window.c     # GRAY16 → GRAY8 bit‑window extractor
+├── gstgray16color.c      # direct GRAY16 → RGB via LUT
+└── tests/                # shell tests
+    ├── smoke.sh
+    └── functional.sh
 ```
-
-## Conventions
-
-- All source code comments and commit messages should be written in English.
-- Follow the existing code style; see `.editorconfig` and `.clang-format` for formatting rules. Indentation: 2 spaces, no tabs (except Makefile).
-
-## Performance and optimizations
-
-- Two-pass, allocation-free algorithm:
-  - Auto mode (default): first pass finds min/max, second pass normalizes.
-  - Manual mode: full-range [0, 65535] uses a fast path `v >> 8`.
-- Fixed-point instead of float on the hot path:
-  - Scalar path uses Q32.32 (accuracy, portability).
-  - AArch64 NEON path uses Q8 scaling with rounding (significantly faster; difference vs Q32.32 is within ±1 LSB; saturation ensures [0..255]).
-- Hardware-specific optimizations for ARM SoC (Cortex-A53, aarch64):
-  - Auto min/max scan and normalization are vectorized with ARM NEON (enabled automatically on aarch64).
-  - For armv7 with NEON, you may enable NEON via compiler flags (see below).
-
-The RGB path applies the palette LUT to normalized 16-bit indices (0..65535) before projecting to RGB; GRAY8 path uses fixed-point scaling and SIMD where available.
-
-## Tests
-
-This repo contains small, hermetic shell tests under `tests/`:
-
-- Smoke test: verifies discovery via gst-inspect-1.0
-  - `make test` or `make test-smoke`
-  - Does: builds the plugin, sets `GST_PLUGIN_PATH` to the repo root, runs `gst-inspect-1.0 gray16norm`.
-- Functional tests: short pipelines with `gst-launch-1.0` (best-effort)
-  - `make test-functional`
-  - Note: some environments cannot negotiate `GRAY16_LE` with `videoconvert` — such cases are treated as SKIP, not a failure.
-- All tests: `make test-all`
-
-Environment isolation:
-- Tests do not install the plugin system-wide; they export `GST_PLUGIN_PATH` to point at the repository root.
-
-## NEON build notes
-
-- aarch64 (e.g., i.MX8): NEON is mandatory and enabled by default; no extra flags are required.
-- armv7 (32-bit ARM): ensure the compiler enables NEON, for example:
-  ```bash
-  make CFLAGS+=" -mfpu=neon -mfloat-abi=hard "
-  ```
-  If NEON is not available, the plugin automatically falls back to the scalar path.
 
 ## Code style and linters
 
-This project follows common GStreamer C conventions. We approximate gst-indent formatting via clang-format using a GNU-like profile with 2-space indentation.
+We follow common GStreamer C conventions. Formatting is approximated via clang‑format (GNU‑like profile, 2‑space indentation).
 
 - Formatting:
-  - Configuration: `.clang-format` (GNU-like, 2 spaces), `.editorconfig` (LF, final newline, 2 spaces; Makefile uses tabs).
-  - Commands:
-    - `make format` — format sources using clang-format.
-    - `make check-format` — verify formatting without modifying files.
+  - `.clang-format`, `.editorconfig`
+  - `make format`, `make check-format`
 - Linting:
-  - Configuration: `.clang-tidy` tuned for C (clang-analyzer, bugprone, cert C checks).
-  - Command: `make lint` — runs clang-tidy with pkg-config CFLAGS for GStreamer.
-- Combined:
-  - `make style` — runs format check and lint.
+  - `.clang-tidy`
+  - `make lint`
+- Combined: `make style`
 
-Important: All source code comments, commit messages, and this README must be written in English only.
+English‑only requirement: All documentation, comments, and commit messages must be in English.
 
 ## License
 
-License: LGPL-2.1-or-later (see source headers, `GST_PLUGIN_DEFINE`, and the `LICENSE` file).
+SPDX: LGPL-2.1-or-later. See source headers, `GST_PLUGIN_DEFINE`, and the `LICENSE` file.
 
-## Notes and Caveats
+## Troubleshooting
 
-- If your environment expects another plugin directory, adjust `INSTALL_DIR` in the Makefile or set `GST_PLUGIN_PATH` accordingly.
-- The example pipelines assume your GStreamer build can convert to/from `GRAY16_LE` with `videoconvert`.
+- If the plugin isn’t discovered, dump the registry/search path:
 
-### Troubleshooting
+```bash
+GST_DEBUG=GST_REGISTRY:6 gst-inspect-1.0 gray16norm |& sed -n '1,120p'
+```
 
-- If the plugin isn’t discovered, print the search path/registry information:
-  ```bash
-  GST_DEBUG=GST_REGISTRY:6 gst-inspect-1.0 gray16norm |& sed -n '1,120p'
-  ```
-- Remove the registry cache if you changed install paths: `rm -f ~/.cache/gstreamer-1.0/registry.*`
-- Increase plugin logs: `GST_DEBUG=gray16norm:6` and optionally `GST_DEBUG_FILE=debug.log`.
+- Remove registry cache when changing install paths:
+
+```bash
+rm -f ~/.cache/gstreamer-1.0/registry.*
+```
+
+- Increase plugin logs:
+
+```bash
+GST_DEBUG=gray16norm:6
+export GST_DEBUG_FILE=debug.log   # optional
+```

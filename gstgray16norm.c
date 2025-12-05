@@ -29,13 +29,7 @@
 #define GST_GRAY16NORM_HAVE_NEON 0
 #endif
 
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64)
-/* SSE2 intrinsics for x86/x86_64 */
-#include <emmintrin.h>
-#define GST_GRAY16NORM_HAVE_SSE2 1
-#else
-#define GST_GRAY16NORM_HAVE_SSE2 0
-#endif
+/* X86-specific SSE2 path has been removed. Use GNU Vector Extensions on x86. */
 
 /* GCC/Clang vector extensions (portable vector types) */
 #if (defined(__GNUC__) || defined(__clang__)) && !defined(__IBMC__)
@@ -96,11 +90,11 @@ GST_STATIC_PAD_TEMPLATE (
 
 static GstStaticPadTemplate src_tmpl =
 GST_STATIC_PAD_TEMPLATE (
-		"src",
-		GST_PAD_SRC,
-		GST_PAD_ALWAYS,
-		GST_STATIC_CAPS ("video/x-raw, format=(string){ GRAY8, RGB }")
-		);
+        "src",
+        GST_PAD_SRC,
+        GST_PAD_ALWAYS,
+        GST_STATIC_CAPS ("video/x-raw, format=(string){ GRAY8, RGB, BGR, RGBx, BGRx, RGBA, BGRA }")
+        );
 
 /* No separate helper: transform is optimized to be two-pass, stride-aware, and allocation-free. */
 
@@ -120,9 +114,17 @@ gst_gray16norm_set_info (GstVideoFilter * video_filter,
 		GST_ERROR_OBJECT (self, "Only GRAY16_LE supported on sink");
 		return FALSE;
 	}
-	if (GST_VIDEO_INFO_FORMAT (out_info) != GST_VIDEO_FORMAT_GRAY8 &&
-        GST_VIDEO_INFO_FORMAT (out_info) != GST_VIDEO_FORMAT_RGB) {
-        GST_ERROR_OBJECT (self, "Only GRAY8 or RGB supported on src");
+ switch (GST_VIDEO_INFO_FORMAT (out_info)) {
+      case GST_VIDEO_FORMAT_GRAY8:
+      case GST_VIDEO_FORMAT_RGB:
+      case GST_VIDEO_FORMAT_BGR:
+      case GST_VIDEO_FORMAT_RGBx:
+      case GST_VIDEO_FORMAT_BGRx:
+      case GST_VIDEO_FORMAT_RGBA:
+      case GST_VIDEO_FORMAT_BGRA:
+        break;
+      default:
+        GST_ERROR_OBJECT (self, "Unsupported src format (expect GRAY8 or RGB* variants)");
         return FALSE;
     }
 
@@ -198,41 +200,6 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
       if (vmax_scalar > maxPixelValue) maxPixelValue = vmax_scalar;
       GST_LOG_OBJECT (self, "auto-range: NEON min=%u max=%u",
                       (unsigned) minPixelValue, (unsigned) maxPixelValue);
-#elif GST_GRAY16NORM_HAVE_SSE2
-      /* SSE2 path: use bias-xor by 0x8000 to emulate unsigned min/max with signed ops */
-      const __m128i vbias = _mm_set1_epi16 ((short)0x8000);
-      __m128i vminx = _mm_set1_epi16 ((short)0x7FFF);   /* +32767 */
-      __m128i vmaxx = _mm_set1_epi16 ((short)0x8000);   /* -32768 */
-      for (gsize y = 0; y < height; y++) {
-        const guint8 *line = in_base + y * in_stride;
-        const guint16 *line16 = (const guint16 *) line;
-        gsize x = 0;
-        const gsize w8 = width & ~(gsize)7; /* process 8 pixels */
-        for (; x < w8; x += 8) {
-          __m128i v = _mm_loadu_si128 ((const __m128i *) (line16 + x));
-          __m128i vx = _mm_xor_si128 (v, vbias); /* bias to signed */
-          vminx = _mm_min_epi16 (vminx, vx);
-          vmaxx = _mm_max_epi16 (vmaxx, vx);
-        }
-        /* tail */
-        for (; x < width; x++) {
-          const guint16 v = line16[x];
-          if (v < minPixelValue) minPixelValue = v;
-          if (v > maxPixelValue) maxPixelValue = v;
-        }
-      }
-      /* Unbias and reduce vectors to scalars */
-      __m128i vmin = _mm_xor_si128 (vminx, vbias);
-      __m128i vmax = _mm_xor_si128 (vmaxx, vbias);
-      guint16 tmpmin[8], tmpmax[8];
-      _mm_storeu_si128 ((__m128i *) tmpmin, vmin);
-      _mm_storeu_si128 ((__m128i *) tmpmax, vmax);
-      for (int i = 0; i < 8; i++) {
-        if (tmpmin[i] < minPixelValue) minPixelValue = tmpmin[i];
-        if (tmpmax[i] > maxPixelValue) maxPixelValue = tmpmax[i];
-      }
-      GST_LOG_OBJECT (self, "auto-range: SSE2 min=%u max=%u",
-                      (unsigned) minPixelValue, (unsigned) maxPixelValue);
 #elif GST_GRAY16NORM_HAVE_GNU_VECTOR
       /* GCC/Clang vector extensions path (vector_size(16) of u16).
        * This path is architecture-agnostic and lets the compiler pick
@@ -289,23 +256,30 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
 
     /* Degenerate range: fill zeros quickly */
     if (G_UNLIKELY (maxPixelValue <= minPixelValue)) {
-      /* Handle both output formats */
-      if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_RGB) {
-        for (gsize y = 0; y < height; y++) {
-          guint8 *out_line = out_base + y * out_stride;
-          memset (out_line, 0, (size_t) (width * 3));
-        }
-      } else {
-        for (gsize y = 0; y < height; y++) {
-          guint8 *out_line = out_base + y * out_stride;
-          memset (out_line, 0, (size_t) width);
-        }
+      const GstVideoFormat fmt = GST_VIDEO_INFO_FORMAT (&self->out_info);
+      gsize bpp = 1;
+      switch (fmt) {
+        case GST_VIDEO_FORMAT_RGB:
+        case GST_VIDEO_FORMAT_BGR: bpp = 3; break;
+        case GST_VIDEO_FORMAT_RGBx:
+        case GST_VIDEO_FORMAT_BGRx:
+        case GST_VIDEO_FORMAT_RGBA:
+        case GST_VIDEO_FORMAT_BGRA: bpp = 4; break;
+        default: bpp = 1; break;
+      }
+      for (gsize y = 0; y < height; y++) {
+        guint8 *out_line = out_base + y * out_stride;
+        memset (out_line, 0, (size_t) (width * bpp));
       }
       return GST_FLOW_OK;
     }
 
-    /* If RGB output requested, take a dedicated path using LUT on normalized 16-bit */
-    if (GST_VIDEO_INFO_FORMAT (&self->out_info) == GST_VIDEO_FORMAT_RGB) {
+    /* If color output requested, take a dedicated path using LUT on normalized 16-bit */
+    {
+      const GstVideoFormat ofmt = GST_VIDEO_INFO_FORMAT (&self->out_info);
+      if (ofmt == GST_VIDEO_FORMAT_RGB || ofmt == GST_VIDEO_FORMAT_BGR ||
+          ofmt == GST_VIDEO_FORMAT_RGBx || ofmt == GST_VIDEO_FORMAT_BGRx ||
+          ofmt == GST_VIDEO_FORMAT_RGBA || ofmt == GST_VIDEO_FORMAT_BGRA) {
       const guint32 range = (guint32) (maxPixelValue - minPixelValue);
 
       /* Pick LUT pointer based on palette */
@@ -319,18 +293,55 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         default:                              lut = gray16_to_rgb; break;
       }
 
+      /* Helper lambdas (C99 inline) for writing one pixel */
+      #define PACK_RGB(r,g,b)   do { out_line[off+0]=(r); out_line[off+1]=(g); out_line[off+2]=(b); } while(0)
+      #define PACK_BGR(r,g,b)   do { out_line[off+0]=(b); out_line[off+1]=(g); out_line[off+2]=(r); } while(0)
+      #define PACK_RGBX(r,g,b)  ((guint32)(((guint32)(r)<<16)|((guint32)(g)<<8)|((guint32)(b))))
+      #define PACK_BGRX(r,g,b)  ((guint32)(((guint32)(b)<<16)|((guint32)(g)<<8)|((guint32)(r))))
+      #define PACK_RGBA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(r)<<16)|((guint32)(g)<<8)|((guint32)(b))))
+      #define PACK_BGRA(r,g,b)  ((guint32)(0xFF000000u | ((guint32)(b)<<16)|((guint32)(g)<<8)|((guint32)(r))))
+
+      /* Fast path: full range manual mapping (index == v) */
       if (G_UNLIKELY (!self->auto_range && minPixelValue == 0 && maxPixelValue == 65535)) {
-        /* Full-range manual mapping: index == v */
         for (gsize y = 0; y < height; y++) {
           const guint8 *in_line = in_base + y * in_stride;
           guint8 *out_line = out_base + y * out_stride;
-          for (gsize x = 0; x < width; x++) {
-            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
-            const uint8_t *rgb = lut[v];
-            const gsize off = 3 * x;
-            out_line[off + 0] = rgb[0];
-            out_line[off + 1] = rgb[1];
-            out_line[off + 2] = rgb[2];
+          if (ofmt == GST_VIDEO_FORMAT_RGB) {
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              const gsize off = 3 * x;
+              PACK_RGB(rgb[0], rgb[1], rgb[2]);
+            }
+          } else if (ofmt == GST_VIDEO_FORMAT_BGR) {
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              const gsize off = 3 * x;
+              PACK_BGR(rgb[0], rgb[1], rgb[2]);
+            }
+          } else if (ofmt == GST_VIDEO_FORMAT_RGBx) {
+            guint32 *out32 = (guint32*) out_line;
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              out32[x] = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
+            }
+          } else if (ofmt == GST_VIDEO_FORMAT_BGRx) {
+            guint32 *out32 = (guint32*) out_line;
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              out32[x] = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
+            }
+          } else if (ofmt == GST_VIDEO_FORMAT_RGBA) {
+            guint32 *out32 = (guint32*) out_line;
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              out32[x] = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
+            }
+          } else if (ofmt == GST_VIDEO_FORMAT_BGRA) {
+            guint32 *out32 = (guint32*) out_line;
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[((const guint16*)in_line)[x]];
+              out32[x] = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
+            }
           }
         }
         return GST_FLOW_OK;
@@ -341,26 +352,46 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
       for (gsize y = 0; y < height; y++) {
         const guint8 *in_line = in_base + y * in_stride;
         guint8 *out_line = out_base + y * out_stride;
-        for (gsize x = 0; x < width; x++) {
-          const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
-          guint32 idx;
-          if (G_UNLIKELY (v <= minPixelValue)) {
-            idx = 0u;
-          } else if (G_UNLIKELY (v >= maxPixelValue)) {
-            idx = 65535u;
-          } else {
-            const guint32 t = (guint32) (v - minPixelValue);
-            idx = (t * scale + (range >> 1)) / range; /* rounded */
-            if (idx > 65535u) idx = 65535u; /* safety */
+        if (ofmt == GST_VIDEO_FORMAT_RGB || ofmt == GST_VIDEO_FORMAT_BGR) {
+          for (gsize x = 0; x < width; x++) {
+            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
+            guint32 idx;
+            if (G_UNLIKELY (v <= minPixelValue)) idx = 0u;
+            else if (G_UNLIKELY (v >= maxPixelValue)) idx = 65535u;
+            else {
+              const guint32 t = (guint32) (v - minPixelValue);
+              idx = (t * scale + (range >> 1)) / range;
+              if (idx > 65535u) idx = 65535u;
+            }
+            const uint8_t *rgb = lut[idx];
+            const gsize off = 3 * x;
+            if (ofmt == GST_VIDEO_FORMAT_RGB) PACK_RGB(rgb[0], rgb[1], rgb[2]);
+            else                              PACK_BGR(rgb[0], rgb[1], rgb[2]);
           }
-          const uint8_t *rgb = lut[idx];
-          const gsize off = 3 * x;
-          out_line[off + 0] = rgb[0];
-          out_line[off + 1] = rgb[1];
-          out_line[off + 2] = rgb[2];
+        } else {
+          guint32 *out32 = (guint32*) out_line;
+          for (gsize x = 0; x < width; x++) {
+            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
+            guint32 idx;
+            if (G_UNLIKELY (v <= minPixelValue)) idx = 0u;
+            else if (G_UNLIKELY (v >= maxPixelValue)) idx = 65535u;
+            else {
+              const guint32 t = (guint32) (v - minPixelValue);
+              idx = (t * scale + (range >> 1)) / range;
+              if (idx > 65535u) idx = 65535u;
+            }
+            const uint8_t *rgb = lut[idx];
+            guint32 packed = 0;
+            if (ofmt == GST_VIDEO_FORMAT_RGBx)      packed = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
+            else if (ofmt == GST_VIDEO_FORMAT_BGRx) packed = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
+            else if (ofmt == GST_VIDEO_FORMAT_RGBA) packed = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
+            else /* BGRA */                          packed = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
+            out32[x] = packed;
+          }
         }
       }
       return GST_FLOW_OK;
+      }
     }
 
     /* Below: GRAY8 output path (original behavior) */
@@ -424,48 +455,6 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         } else {
           const guint32 t = (guint32) (v - minPixelValue);
           const guint32 val = (t * (guint32) scale_q8 + 128u) >> 8;
-          out_line[x] = (val > 255u) ? 255u : (guint8) val;
-        }
-      }
-    }
-#elif GST_GRAY16NORM_HAVE_SSE2
-    /* SSE2 path: Q16 scaling with pmulhuw, clamp t in [0..range] using unsigned saturating ops */
-    const guint16 scale_q16 = (guint16) (((255u << 16) + (range >> 1)) / range);
-    const __m128i vmin_dup = _mm_set1_epi16 ((short) minPixelValue);
-    const __m128i vrange_dup = _mm_set1_epi16 ((short) range);
-    const __m128i vscale_dup = _mm_set1_epi16 ((short) scale_q16);
-    const __m128i vzero = _mm_setzero_si128 ();
-    GST_LOG_OBJECT (self, "normalize: SSE2 scale_q16=%u (range=%u)",
-                    (unsigned) scale_q16, (unsigned) range);
-
-    for (gsize y = 0; y < height; y++) {
-      const guint8 *in_line_u8 = in_base + y * in_stride;
-      guint8 *out_line = out_base + y * out_stride;
-      const guint16 *in_line = (const guint16 *) in_line_u8;
-      gsize x = 0;
-      const gsize w8 = width & ~(gsize)7;
-      for (; x < w8; x += 8) {
-        __m128i vin = _mm_loadu_si128 ((const __m128i *) (in_line + x));
-        /* t = clamp(v - min, 0..range) */
-        __m128i t = _mm_subs_epu16 (vin, vmin_dup);              /* saturating unsigned subtract */
-        __m128i over = _mm_subs_epu16 (t, vrange_dup);            /* over = max(t - range, 0) */
-        t = _mm_sub_epi16 (t, over);                              /* t = min(t, range) */
-        /* Multiply by scale_q16 and keep high 16 bits (>> 16) */
-        __m128i prod_hi = _mm_mulhi_epu16 (t, vscale_dup);        /* unsigned high half */
-        /* Narrow to 8-bit with saturation (values are 0..255 already) */
-        __m128i bytes = _mm_packus_epi16 (prod_hi, vzero);
-        _mm_storel_epi64 ((__m128i *) (out_line + x), bytes);     /* store 8 bytes */
-      }
-      /* tail */
-      for (; x < width; x++) {
-        const guint16 v = in_line[x];
-        if (v <= minPixelValue) {
-          out_line[x] = 0;
-        } else if (v >= maxPixelValue) {
-          out_line[x] = 255;
-        } else {
-          const guint32 t = (guint32) (v - minPixelValue);
-          const guint32 val = (t * (guint32) scale_q16) >> 16; /* already rounded in scale */
           out_line[x] = (val > 255u) ? 255u : (guint8) val;
         }
       }
@@ -536,14 +525,13 @@ gst_gray16norm_transform_caps (GstBaseTransform * trans,
 	for (guint i = 0; i < n; i++) {
 		const GstStructure *s = gst_caps_get_structure (caps, i);
 		if (direction == GST_PAD_SINK) {
-			/* From sink (GRAY16_LE) to src: advertise both GRAY8 and RGB */
-			GstStructure *s_gray8 = gst_structure_copy (s);
-			gst_structure_set (s_gray8, "format", G_TYPE_STRING, "GRAY8", NULL);
-			gst_caps_append_structure (result, s_gray8);
-
-			GstStructure *s_rgb = gst_structure_copy (s);
-			gst_structure_set (s_rgb, "format", G_TYPE_STRING, "RGB", NULL);
-			gst_caps_append_structure (result, s_rgb);
+	   /* From sink (GRAY16_LE) to src: advertise GRAY8 and RGB* variants */
+	   static const char *fmts[] = {"GRAY8","RGB","BGR","RGBx","BGRx","RGBA","BGRA"};
+	   for (guint k=0;k<G_N_ELEMENTS(fmts);k++) {
+	     GstStructure *sc = gst_structure_copy (s);
+	     gst_structure_set (sc, "format", G_TYPE_STRING, fmts[k], NULL);
+	     gst_caps_append_structure (result, sc);
+	   }
 		} else {
 			/* From src caps to sink caps */
 			GstStructure *s2 = gst_structure_copy (s);

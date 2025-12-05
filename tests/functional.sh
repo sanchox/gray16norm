@@ -41,30 +41,21 @@ run_pipe "manual-gray8" \
   video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false black-level=1000 white-level=20000 ! \
   fakesink sync=false
 
-# RGB output via LUT palettes (force RGB on src caps)
-run_pipe "rgb-turbo" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=turbo ! \
-  video/x-raw,format=RGB ! fakesink sync=false
-
-run_pipe "rgb-viridis" \
+# Normalized color output via gray16norm (RGBx)
+run_pipe "norm-color-rgbx" \
   videotestsrc num-buffers=5 ! videoconvert ! \
   video/x-raw,format=GRAY16_LE ! gray16norm palette=viridis ! \
-  video/x-raw,format=RGB ! fakesink sync=false
+  video/x-raw,format=RGBx ! fakesink sync=false
 
-run_pipe "rgb-magma" \
+# Color output via gray16color (tabular Gray16->color, no normalization)
+run_pipe "color-rgbx-viridis" \
   videotestsrc num-buffers=5 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=magma ! \
-  video/x-raw,format=RGB ! fakesink sync=false
+  video/x-raw,format=GRAY16_LE ! gray16color palette=viridis ! \
+  video/x-raw,format=RGBx ! fakesink sync=false
 
-run_pipe "rgb-jet" \
+run_pipe "color-bgr16-turbo" \
   videotestsrc num-buffers=5 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=jet ! \
-  video/x-raw,format=RGB ! fakesink sync=false
-
-run_pipe "rgb-prism" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
-  video/x-raw,format=GRAY16_LE ! gray16norm palette=prism ! \
-  video/x-raw,format=RGB ! fakesink sync=false
+  video/x-raw,format=GRAY16_LE ! gray16color palette=turbo ! \
+  video/x-raw,format=BGR16 ! fakesink sync=false
 
 echo "[func] Done"

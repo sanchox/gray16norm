@@ -7,6 +7,8 @@
 *.dll
 *.dylib
 
+gray16_to_rgb_lut*.h
+
 # Debug/IDE
 *.dSYM/
 *.swp
