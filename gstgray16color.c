@@ -236,15 +236,16 @@ gst_gray16color_transform_frame (GstVideoFilter *vf, GstVideoFrame *inframe, Gst
   const gsize w = GST_VIDEO_FRAME_WIDTH (inframe);
   const gsize h = GST_VIDEO_FRAME_HEIGHT (inframe);
 
-  const guint format = GST_VIDEO_INFO_FORMAT (&self->out_info);
+  /* const guint format = GST_VIDEO_INFO_FORMAT (&self->out_info); */
   const gsize elem = self->lut_stride; /* 2 or 4 */
   const guint8 *lut = (const guint8 *) self->lut_ptr;
 
   for (gsize y = 0; y < h; y++) {
-    const guint16 *src = (const guint16 *)(in_base + y * in_stride);
+    const guint8 *src = in_base + y * in_stride;
     guint8 *dst = out_base + y * out_stride;
     for (gsize x = 0; x < w; x++) {
-      const guint16 v = src[x]; /* GRAY16_LE, platform is LE */
+      /* Read little-endian 16-bit to be robust even if upstream provides bytes swapped */
+      const guint16 v = GST_READ_UINT16_LE (src + (x << 1));
       const guint8 *p = lut + ((gsize)v * elem);
       if (elem == 4) {
         /* 32-bit store */
