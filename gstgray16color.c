@@ -280,11 +280,19 @@ gst_gray16color_transform_caps (GstBaseTransform *trans, GstPadDirection directi
       for (guint k=0;k<G_N_ELEMENTS(fmts);k++) {
         GstStructure *sc = gst_structure_copy (s);
         gst_structure_set (sc, "format", G_TYPE_STRING, fmts[k], NULL);
+        /* Drop YUV-specific fields that should not appear on RGB outputs. */
+        gst_structure_remove_field (sc, "colorimetry");
+        gst_structure_remove_field (sc, "chroma-site");
+        gst_structure_remove_field (sc, "range");
         gst_caps_append_structure (result, sc);
       }
     } else {
       GstStructure *s2 = gst_structure_copy (s);
       gst_structure_set (s2, "format", G_TYPE_STRING, "GRAY16_LE", NULL);
+      /* GRAY16 caps should not carry YUV colorimetry/chroma metadata. */
+      gst_structure_remove_field (s2, "colorimetry");
+      gst_structure_remove_field (s2, "chroma-site");
+      gst_structure_remove_field (s2, "range");
       gst_caps_append_structure (result, s2);
     }
   }
