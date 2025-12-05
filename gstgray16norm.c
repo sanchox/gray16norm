@@ -354,46 +354,99 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         return GST_FLOW_OK;
       }
 
-      /* General case: compute normalized index in [0..65535] with rounding */
-      const guint32 scale = 65535u; /* numerator in (t * scale + range/2) / range */
+      /* General case: compute normalized index in [0..65535] without per-pixel division
+       * idx = round((v - min) * 65535 / range). We approximate division by a fixed-point
+       * reciprocal computed once per frame. */
+      /* Protect against degenerate range */
+      if (G_UNLIKELY (range == 0u)) {
+        /* Flat frame: map everything to either 0 or 65535 depending on relation to min/max */
+        const guint16 flat_idx = 0u; /* all pixels equal; choose 0 for consistency */
+        for (gsize y = 0; y < height; y++) {
+          const guint8 *in_line = in_base + y * in_stride;
+          guint8 *out_line = out_base + y * out_stride;
+          if (ofmt == GST_VIDEO_FORMAT_RGB || ofmt == GST_VIDEO_FORMAT_BGR) {
+            for (gsize x = 0; x < width; x++) {
+              const uint8_t *rgb = lut[flat_idx];
+              const gsize off = 3 * x;
+              if (ofmt == GST_VIDEO_FORMAT_RGB) PACK_RGB(rgb[0], rgb[1], rgb[2]);
+              else                              PACK_BGR(rgb[0], rgb[1], rgb[2]);
+            }
+          } else {
+            guint32 *out32 = (guint32*) out_line;
+            guint32 packed = 0;
+            {
+              const uint8_t *rgb = lut[flat_idx];
+              if (ofmt == GST_VIDEO_FORMAT_RGBx)      packed = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
+              else if (ofmt == GST_VIDEO_FORMAT_BGRx) packed = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
+              else if (ofmt == GST_VIDEO_FORMAT_RGBA) packed = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
+              else /* BGRA */                          packed = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
+            }
+            for (gsize x = 0; x < width; x++) out32[x] = packed;
+          }
+        }
+        return GST_FLOW_OK;
+      }
+
+      /* Fixed-point reciprocal in Q24 (8.24 format):
+       * recip ≈ (65535 << 24) / range with rounding, but to avoid overflow in (t * recip),
+       * we compute recip = ((1u<<24) + range/2) / range and then scale by 65535 via the t domain
+       * as: idx = ((t * recip) * 65535 + (1<<23)) >> 24. However, to keep it fast, we fold 65535
+       * into the reciprocal directly: recip65535 = (65535u << 24) / range. */
+      const guint32 recip65535 = (guint32) (((guint64)65535u << 24) / (guint64) range);
+
+      /* 32-bit color formats: build per-frame packed LUT once to avoid per-pixel math. */
+      if (ofmt == GST_VIDEO_FORMAT_RGBx || ofmt == GST_VIDEO_FORMAT_BGRx ||
+          ofmt == GST_VIDEO_FORMAT_RGBA || ofmt == GST_VIDEO_FORMAT_BGRA) {
+        guint32 *frame_lut = (guint32 *) g_malloc (65536u * sizeof (guint32));
+        if (G_UNLIKELY (!frame_lut)) return GST_FLOW_ERROR;
+        for (guint32 v = 0; v <= 65535u; v++) {
+          guint32 idx;
+          if (v <= minPixelValue) idx = 0u;
+          else if (v >= maxPixelValue) idx = 65535u;
+          else {
+            const guint32 t = (guint32) (v - (guint32) minPixelValue);
+            idx = (guint32) ((((guint64)t * (guint64)recip65535) + (1u<<23)) >> 24);
+            if (idx > 65535u) idx = 65535u;
+          }
+          const uint8_t *rgb = lut[idx];
+          if (ofmt == GST_VIDEO_FORMAT_RGBx)      frame_lut[v] = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
+          else if (ofmt == GST_VIDEO_FORMAT_BGRx) frame_lut[v] = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
+          else if (ofmt == GST_VIDEO_FORMAT_RGBA) frame_lut[v] = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
+          else                                    frame_lut[v] = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
+        }
+
+        for (gsize y = 0; y < height; y++) {
+          const guint16 *in_line = (const guint16 *) (in_base + y * in_stride);
+          guint32 *out32 = (guint32 *) (out_base + y * out_stride);
+          for (gsize x = 0; x < width; x++) {
+            const guint16 v = in_line[x];
+            out32[x] = frame_lut[v];
+          }
+        }
+        g_free (frame_lut);
+        return GST_FLOW_OK;
+      }
+
+      /* 24-bit RGB/BGR: keep per-pixel LUT but use fixed-point normalization (no division). */
       for (gsize y = 0; y < height; y++) {
         const guint8 *in_line = in_base + y * in_stride;
         guint8 *out_line = out_base + y * out_stride;
-        if (ofmt == GST_VIDEO_FORMAT_RGB || ofmt == GST_VIDEO_FORMAT_BGR) {
-          for (gsize x = 0; x < width; x++) {
-            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
-            guint32 idx;
-            if (G_UNLIKELY (v <= minPixelValue)) idx = 0u;
-            else if (G_UNLIKELY (v >= maxPixelValue)) idx = 65535u;
-            else {
-              const guint32 t = (guint32) (v - minPixelValue);
-              idx = (t * scale + (range >> 1)) / range;
-              if (idx > 65535u) idx = 65535u;
-            }
-            const uint8_t *rgb = lut[idx];
-            const gsize off = 3 * x;
-            if (ofmt == GST_VIDEO_FORMAT_RGB) PACK_RGB(rgb[0], rgb[1], rgb[2]);
-            else                              PACK_BGR(rgb[0], rgb[1], rgb[2]);
+        for (gsize x = 0; x < width; x++) {
+          const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
+          guint32 idx;
+          if (G_UNLIKELY (v <= minPixelValue)) idx = 0u;
+          else if (G_UNLIKELY (v >= maxPixelValue)) idx = 65535u;
+          else {
+            const guint32 t = (guint32) (v - minPixelValue);
+            idx = (guint32) ((((guint64)t * (guint64)recip65535) + (1u<<23)) >> 24);
+            if (idx > 65535u) idx = 65535u;
           }
-        } else {
-          guint32 *out32 = (guint32*) out_line;
-          for (gsize x = 0; x < width; x++) {
-            const guint16 v = GST_READ_UINT16_LE (in_line + (x << 1));
-            guint32 idx;
-            if (G_UNLIKELY (v <= minPixelValue)) idx = 0u;
-            else if (G_UNLIKELY (v >= maxPixelValue)) idx = 65535u;
-            else {
-              const guint32 t = (guint32) (v - minPixelValue);
-              idx = (t * scale + (range >> 1)) / range;
-              if (idx > 65535u) idx = 65535u;
-            }
-            const uint8_t *rgb = lut[idx];
-            guint32 packed = 0;
-            if (ofmt == GST_VIDEO_FORMAT_RGBx)      packed = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
-            else if (ofmt == GST_VIDEO_FORMAT_BGRx) packed = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
-            else if (ofmt == GST_VIDEO_FORMAT_RGBA) packed = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
-            else /* BGRA */                          packed = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
-            out32[x] = packed;
+          const uint8_t *rgb = lut[idx];
+          const gsize off = 3 * x;
+          if (ofmt == GST_VIDEO_FORMAT_RGB) {
+            PACK_RGB(rgb[0], rgb[1], rgb[2]);
+          } else {
+            PACK_BGR(rgb[0], rgb[1], rgb[2]);
           }
         }
       }
