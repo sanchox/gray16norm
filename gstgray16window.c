@@ -17,8 +17,16 @@
 #include <gst/video/gstvideofilter.h>
 #include <gst/base/gstbasetransform.h>
 #include <string.h>
+#include <stdint.h>
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
+#endif
+
+/* GNU vector extensions availability (GCC/Clang) */
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__IBMC__)
+#define GST_GRAY16WINDOW_HAVE_GNU_VECTOR 1
+#else
+#define GST_GRAY16WINDOW_HAVE_GNU_VECTOR 0
 #endif
 
 #ifndef PACKAGE
@@ -167,6 +175,42 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
       or_mask  |= v;
     }
   }
+#elif GST_GRAY16WINDOW_HAVE_GNU_VECTOR
+  /* GNU vector extensions path: process 8 pixels per iteration */
+  typedef uint16_t u16x8 __attribute__((vector_size(16)));
+  const u16x8 V_ONES = (u16x8){0xFFFFu,0xFFFFu,0xFFFFu,0xFFFFu,0xFFFFu,0xFFFFu,0xFFFFu,0xFFFFu};
+  const u16x8 V_ZEROS= (u16x8){0,0,0,0,0,0,0,0};
+  for (gsize y = 0; y < height; y++) {
+    const guint8 *line = in_base + y * in_stride;
+    const guint16 *p16 = (const guint16 *) line; /* little-endian */
+    gsize x = 0;
+    u16x8 v_and = V_ONES;
+    u16x8 v_or  = V_ZEROS;
+    const gsize n16 = width;
+    for (; x + 8 <= n16; x += 8) {
+      u16x8 v;
+      /* use memcpy to avoid potential unaligned UB */
+      memcpy(&v, p16 + x, sizeof(v));
+      v_and &= v;
+      v_or  |= v;
+    }
+    /* horizontal reduce to scalars */
+    guint16 tmp_and[8];
+    guint16 tmp_or [8];
+    memcpy(tmp_and, &v_and, sizeof(tmp_and));
+    memcpy(tmp_or,  &v_or,  sizeof(tmp_or));
+    guint16 line_and = 0xFFFFu;
+    guint16 line_or  = 0x0000u;
+    for (int i = 0; i < 8; i++) { line_and &= tmp_and[i]; line_or |= tmp_or[i]; }
+    and_mask &= line_and;
+    or_mask  |= line_or;
+    /* tail */
+    for (; x < n16; x++) {
+      guint16 v = GST_READ_UINT16_LE ((const guint8 *)(p16 + x));
+      and_mask &= v;
+      or_mask  |= v;
+    }
+  }
 #else
   for (gsize y = 0; y < height; y++) {
     const guint8 *line = in_base + y * in_stride;
@@ -208,6 +252,35 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
       uint16x8_t vshr = vshlq_u16 (v, neg_shift);
       uint8x8_t packed = vmovn_u16 (vshr);
       vst1_u8 (out_line + x, packed);
+    }
+    for (; x < width; x++) {
+      guint16 v = GST_READ_UINT16_LE ((const guint8 *)(p16 + x));
+      out_line[x] = (guint8) ((v >> start_bit) & 0xFFu);
+    }
+  }
+#elif GST_GRAY16WINDOW_HAVE_GNU_VECTOR
+  /* GNU vector extensions path */
+  typedef uint16_t u16x8 __attribute__((vector_size(16)));
+  for (gsize y = 0; y < height; y++) {
+    const guint8 *in_line = in_base + y * in_stride;
+    guint8 *out_line = out_base + y * out_stride;
+    const guint16 *p16 = (const guint16 *) in_line;
+    gsize x = 0;
+    for (; x + 8 <= width; x += 8) {
+      u16x8 v;
+      memcpy(&v, p16 + x, sizeof(v));
+      u16x8 vshr = v >> (unsigned) start_bit;
+      guint16 tmp16[8];
+      memcpy(tmp16, &vshr, sizeof(tmp16));
+      /* narrow to 8-bit */
+      out_line[x + 0] = (guint8)(tmp16[0] & 0xFFu);
+      out_line[x + 1] = (guint8)(tmp16[1] & 0xFFu);
+      out_line[x + 2] = (guint8)(tmp16[2] & 0xFFu);
+      out_line[x + 3] = (guint8)(tmp16[3] & 0xFFu);
+      out_line[x + 4] = (guint8)(tmp16[4] & 0xFFu);
+      out_line[x + 5] = (guint8)(tmp16[5] & 0xFFu);
+      out_line[x + 6] = (guint8)(tmp16[6] & 0xFFu);
+      out_line[x + 7] = (guint8)(tmp16[7] & 0xFFu);
     }
     for (; x < width; x++) {
       guint16 v = GST_READ_UINT16_LE ((const guint8 *)(p16 + x));
