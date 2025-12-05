@@ -33,6 +33,13 @@ CFLAGS      += $(SANITIZERS)
 LDFLAGS     ?=
 LDLIBS      ?= $(shell $(PKG_CONFIG) --libs $(GST_DEPS)) $(SANITIZERS)
 
+# Optional ARM tuning (safe defaults; can be overridden by environment)
+ARCH        ?= $(shell uname -m)
+ifeq ($(ARCH),aarch64)
+# i.MX8MP (Cortex-A53) baseline has NEON; enable reasonable tuning
+CFLAGS      += -march=armv8-a+simd -mtune=cortex-a53
+endif
+
 # Install path (typical user-local)
 INSTALL_DIR ?= $(HOME)/.local/lib/gstreamer-1.0
 

@@ -17,6 +17,9 @@
 #include <gst/video/gstvideofilter.h>
 #include <gst/base/gstbasetransform.h>
 #include <string.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 #ifndef PACKAGE
 #define PACKAGE "gray16norm"
@@ -132,6 +135,39 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
   /* First pass: accumulate AND/OR across the whole frame */
   guint16 and_mask = 0xFFFFu;
   guint16 or_mask  = 0x0000u;
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  for (gsize y = 0; y < height; y++) {
+    const guint8 *line = in_base + y * in_stride;
+    const guint16 *p16 = (const guint16 *) line; /* little-endian on ARM */
+    gsize x = 0;
+    uint16x8_t v_and = vdupq_n_u16 (0xFFFFu);
+    uint16x8_t v_or  = vdupq_n_u16 (0x0000u);
+    const gsize n16 = width;
+    for (; x + 8 <= n16; x += 8) {
+      /* unaligned loads are fine on ARMv8 */
+      uint16x8_t v = vld1q_u16 (p16 + x);
+      v_and = vandq_u16 (v_and, v);
+      v_or  = vorrq_u16 (v_or,  v);
+    }
+    /* horizontal reduce in scalar to keep it simple and correct */
+    guint16 tmp_and[8];
+    guint16 tmp_or [8];
+    vst1q_u16 (tmp_and, v_and);
+    vst1q_u16 (tmp_or,  v_or);
+    guint16 line_and = 0xFFFFu;
+    guint16 line_or  = 0x0000u;
+    for (int i = 0; i < 8; i++) { line_and &= tmp_and[i]; line_or |= tmp_or[i]; }
+    and_mask &= line_and;
+    or_mask  |= line_or;
+    /* tail */
+    for (; x < n16; x++) {
+      guint16 v = GST_READ_UINT16_LE ((const guint8 *)(p16 + x));
+      and_mask &= v;
+      or_mask  |= v;
+    }
+  }
+#else
   for (gsize y = 0; y < height; y++) {
     const guint8 *line = in_base + y * in_stride;
     for (gsize x = 0; x < width; x++) {
@@ -140,6 +176,7 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
       or_mask  |= v;
     }
   }
+#endif
 
   const guint16 change_mask = (guint16) (and_mask ^ or_mask);
   guint start_bit;
@@ -157,6 +194,27 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
                   and_mask, or_mask, change_mask, start_bit);
 
   /* Second pass: extract an 8-bit window starting at start_bit */
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+  /* NEON path: process 8 pixels per iteration */
+  for (gsize y = 0; y < height; y++) {
+    const guint8 *in_line = in_base + y * in_stride;
+    guint8 *out_line = out_base + y * out_stride;
+    const guint16 *p16 = (const guint16 *) in_line;
+    gsize x = 0;
+    const int16x8_t neg_shift = vdupq_n_s16 (-(int) start_bit);
+    for (; x + 8 <= width; x += 8) {
+      uint16x8_t v = vld1q_u16 (p16 + x);
+      /* variable right shift via vshl with negative count */
+      uint16x8_t vshr = vshlq_u16 (v, neg_shift);
+      uint8x8_t packed = vmovn_u16 (vshr);
+      vst1_u8 (out_line + x, packed);
+    }
+    for (; x < width; x++) {
+      guint16 v = GST_READ_UINT16_LE ((const guint8 *)(p16 + x));
+      out_line[x] = (guint8) ((v >> start_bit) & 0xFFu);
+    }
+  }
+#else
   for (gsize y = 0; y < height; y++) {
     const guint8 *in_line = in_base + y * in_stride;
     guint8 *out_line = out_base + y * out_stride;
@@ -166,6 +224,7 @@ gst_gray16window_transform_frame (GstVideoFilter * vfilter,
       out_line[x] = outv;
     }
   }
+#endif
   return GST_FLOW_OK;
 }
 
