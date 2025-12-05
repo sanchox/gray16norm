@@ -64,6 +64,22 @@ typedef struct GstGray16Norm {
 
 	GstVideoInfo in_info;
 	GstVideoInfo out_info;
+
+	/* Cached state across frames to cut per-frame work */
+	/* Last computed min/max (when auto_range=true). Used when skipping scans. */
+	guint16 last_min;
+	guint16 last_max;
+	/* Recompute min/max every Nth frame (1 = every frame). Configurable. */
+	guint    minmax_every_n;
+	guint64  frame_index;
+
+	/* Packed per-frame LUT cache for 32-bit color outputs (size 65536). */
+	guint32 *cached_frame_lut;
+	gboolean lut_valid;
+	guint16  lut_min;
+	guint16  lut_max;
+	GstGray16NormPalette lut_palette;
+	GstVideoFormat      lut_format;
 } GstGray16Norm;
 
 typedef struct GstGray16NormClass {
@@ -77,6 +93,9 @@ typedef struct GstGray16NormClass {
 #define GST_IS_GRAY16NORM_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_GRAY16NORM))
 
 G_DEFINE_TYPE (GstGray16Norm, gst_gray16norm, GST_TYPE_VIDEO_FILTER);
+
+/* Forward declarations for GObject vfuncs defined later */
+static void gst_gray16norm_dispose (GObject *object);
 
 /* --- pad templates --- */
 
@@ -167,11 +186,27 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
                 (unsigned) self->white_level, (unsigned) self->black_level);
     }
 
-    /* Determine min/max */
+    /* Determine min/max (with optional decimation via minmax-every-n) */
     guint16 minPixelValue = self->auto_range ? 0xffff : self->black_level;
     guint16 maxPixelValue = self->auto_range ? 0x0000 : self->white_level;
 
+    /* Frame index increments even if auto_range is off (harmless) */
+    const guint64 cur_index = ++self->frame_index;
+
+    gboolean recompute_minmax = FALSE;
     if (self->auto_range) {
+      /* Recompute exact min/max this frame? */
+      recompute_minmax = (self->minmax_every_n <= 1) || (cur_index % (guint64) self->minmax_every_n == 0);
+    }
+
+    if (self->auto_range && !recompute_minmax) {
+      /* Reuse cached min/max from the last computed frame */
+      minPixelValue = self->last_min;
+      maxPixelValue = self->last_max;
+      GST_LOG_OBJECT (self, "reuse min/max: min=%u max=%u (every-n=%u)",
+                      (unsigned) minPixelValue, (unsigned) maxPixelValue,
+                      (unsigned) self->minmax_every_n);
+    } else if (self->auto_range) {
 #if GST_GRAY16NORM_HAVE_NEON && defined(__aarch64__)
       /* Vectorized min/max scan across full frame */
       uint16x8_t minValueVector = vdupq_n_u16 (0xffffu);
@@ -252,6 +287,9 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         }
       }
 #endif
+      /* Cache computed min/max for future frames if decimation is enabled */
+      self->last_min = minPixelValue;
+      self->last_max = maxPixelValue;
     }
 
     /* Degenerate range: fill zeros quickly */
@@ -362,7 +400,6 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         /* Flat frame: map everything to either 0 or 65535 depending on relation to min/max */
         const guint16 flat_idx = 0u; /* all pixels equal; choose 0 for consistency */
         for (gsize y = 0; y < height; y++) {
-          const guint8 *in_line = in_base + y * in_stride;
           guint8 *out_line = out_base + y * out_stride;
           if (ofmt == GST_VIDEO_FORMAT_RGB || ofmt == GST_VIDEO_FORMAT_BGR) {
             for (gsize x = 0; x < width; x++) {
@@ -394,25 +431,43 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
        * into the reciprocal directly: recip65535 = (65535u << 24) / range. */
       const guint32 recip65535 = (guint32) (((guint64)65535u << 24) / (guint64) range);
 
-      /* 32-bit color formats: build per-frame packed LUT once to avoid per-pixel math. */
+      /* 32-bit color formats: build or reuse packed LUT to avoid per-pixel math. */
       if (ofmt == GST_VIDEO_FORMAT_RGBx || ofmt == GST_VIDEO_FORMAT_BGRx ||
           ofmt == GST_VIDEO_FORMAT_RGBA || ofmt == GST_VIDEO_FORMAT_BGRA) {
-        guint32 *frame_lut = (guint32 *) g_malloc (65536u * sizeof (guint32));
-        if (G_UNLIKELY (!frame_lut)) return GST_FLOW_ERROR;
-        for (guint32 v = 0; v <= 65535u; v++) {
-          guint32 idx;
-          if (v <= minPixelValue) idx = 0u;
-          else if (v >= maxPixelValue) idx = 65535u;
-          else {
-            const guint32 t = (guint32) (v - (guint32) minPixelValue);
-            idx = (guint32) ((((guint64)t * (guint64)recip65535) + (1u<<23)) >> 24);
-            if (idx > 65535u) idx = 65535u;
+        gboolean need_rebuild = TRUE;
+        if (self->lut_valid &&
+            self->lut_min == minPixelValue && self->lut_max == maxPixelValue &&
+            self->lut_palette == self->palette && self->lut_format == ofmt) {
+          need_rebuild = FALSE;
+        }
+
+        if (G_UNLIKELY (self->cached_frame_lut == NULL)) {
+          self->cached_frame_lut = (guint32 *) g_malloc (65536u * sizeof (guint32));
+          if (G_UNLIKELY (!self->cached_frame_lut)) return GST_FLOW_ERROR;
+        }
+
+        if (need_rebuild) {
+          guint32 *frame_lut = self->cached_frame_lut;
+          for (guint32 v = 0; v <= 65535u; v++) {
+            guint32 idx;
+            if (v <= minPixelValue) idx = 0u;
+            else if (v >= maxPixelValue) idx = 65535u;
+            else {
+              const guint32 t = (guint32) (v - (guint32) minPixelValue);
+              idx = (guint32) ((((guint64)t * (guint64)recip65535) + (1u<<23)) >> 24);
+              if (idx > 65535u) idx = 65535u;
+            }
+            const uint8_t *rgb = lut[idx];
+            if (ofmt == GST_VIDEO_FORMAT_RGBx)      frame_lut[v] = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
+            else if (ofmt == GST_VIDEO_FORMAT_BGRx) frame_lut[v] = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
+            else if (ofmt == GST_VIDEO_FORMAT_RGBA) frame_lut[v] = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
+            else                                    frame_lut[v] = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
           }
-          const uint8_t *rgb = lut[idx];
-          if (ofmt == GST_VIDEO_FORMAT_RGBx)      frame_lut[v] = PACK_RGBX(rgb[0], rgb[1], rgb[2]);
-          else if (ofmt == GST_VIDEO_FORMAT_BGRx) frame_lut[v] = PACK_BGRX(rgb[0], rgb[1], rgb[2]);
-          else if (ofmt == GST_VIDEO_FORMAT_RGBA) frame_lut[v] = PACK_RGBA(rgb[0], rgb[1], rgb[2]);
-          else                                    frame_lut[v] = PACK_BGRA(rgb[0], rgb[1], rgb[2]);
+          self->lut_valid  = TRUE;
+          self->lut_min    = minPixelValue;
+          self->lut_max    = maxPixelValue;
+          self->lut_palette= self->palette;
+          self->lut_format = ofmt;
         }
 
         for (gsize y = 0; y < height; y++) {
@@ -420,10 +475,9 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
           guint32 *out32 = (guint32 *) (out_base + y * out_stride);
           for (gsize x = 0; x < width; x++) {
             const guint16 v = in_line[x];
-            out32[x] = frame_lut[v];
+            out32[x] = self->cached_frame_lut[v];
           }
         }
-        g_free (frame_lut);
         return GST_FLOW_OK;
       }
 
@@ -628,6 +682,7 @@ enum {
 	PROP_BLACK_LEVEL,
 	PROP_WHITE_LEVEL,
 	PROP_PALETTE,
+	PROP_MINMAX_EVERY_N,
 };
 
 static void
@@ -636,38 +691,43 @@ gst_gray16norm_set_property (GObject * object, const guint prop_id,
 {
 	GstGray16Norm *self = GST_GRAY16NORM (object);
 
-	switch (prop_id) {
-		case PROP_AUTO_RANGE:
-			self->auto_range = g_value_get_boolean (value);
-			break;
-		case PROP_BLACK_LEVEL:
-			self->black_level = (guint16) g_value_get_uint (value);
-			break;
-		case PROP_WHITE_LEVEL:
-			self->white_level = (guint16) g_value_get_uint (value);
-			break;
-		case PROP_PALETTE: {
-			const gchar *s = g_value_get_string (value);
-			if (!s) { self->palette = GST_GRAY16NORM_PALETTE_TURBO; break; }
-			if (g_ascii_strcasecmp (s, "turbo") == 0) {
-				self->palette = GST_GRAY16NORM_PALETTE_TURBO;
-			} else if (g_ascii_strcasecmp (s, "viridis") == 0 ||
-			           g_ascii_strcasecmp (s, "virdis") == 0) {
-				self->palette = GST_GRAY16NORM_PALETTE_VIRIDIS;
-			} else if (g_ascii_strcasecmp (s, "magma") == 0) {
-				self->palette = GST_GRAY16NORM_PALETTE_MAGMA;
-			} else if (g_ascii_strcasecmp (s, "jet") == 0) {
-				self->palette = GST_GRAY16NORM_PALETTE_JET;
-			} else if (g_ascii_strcasecmp (s, "prism") == 0) {
-				self->palette = GST_GRAY16NORM_PALETTE_PRISM;
-			} else {
-				GST_WARNING_OBJECT (self, "Unknown palette '%s', using turbo", s);
-				self->palette = GST_GRAY16NORM_PALETTE_TURBO;
-			}
-			break; }
-		default:
-			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-			break;
+		switch (prop_id) {
+			case PROP_AUTO_RANGE:
+				self->auto_range = g_value_get_boolean (value);
+				break;
+			case PROP_BLACK_LEVEL:
+				self->black_level = (guint16) g_value_get_uint (value);
+				break;
+			case PROP_WHITE_LEVEL:
+				self->white_level = (guint16) g_value_get_uint (value);
+				break;
+			case PROP_PALETTE: {
+				const gchar *s = g_value_get_string (value);
+				if (!s) { self->palette = GST_GRAY16NORM_PALETTE_TURBO; break; }
+				if (g_ascii_strcasecmp (s, "turbo") == 0) {
+					self->palette = GST_GRAY16NORM_PALETTE_TURBO;
+				} else if (g_ascii_strcasecmp (s, "viridis") == 0 ||
+				           g_ascii_strcasecmp (s, "virdis") == 0) {
+					self->palette = GST_GRAY16NORM_PALETTE_VIRIDIS;
+				} else if (g_ascii_strcasecmp (s, "magma") == 0) {
+					self->palette = GST_GRAY16NORM_PALETTE_MAGMA;
+				} else if (g_ascii_strcasecmp (s, "jet") == 0) {
+					self->palette = GST_GRAY16NORM_PALETTE_JET;
+				} else if (g_ascii_strcasecmp (s, "prism") == 0) {
+					self->palette = GST_GRAY16NORM_PALETTE_PRISM;
+				} else {
+					GST_WARNING_OBJECT (self, "Unknown palette '%s', using turbo", s);
+					self->palette = GST_GRAY16NORM_PALETTE_TURBO;
+				}
+				break; }
+			case PROP_MINMAX_EVERY_N: {
+				guint n = g_value_get_uint (value);
+				if (n == 0) n = 1; /* guard */
+				self->minmax_every_n = n;
+				break; }
+			default:
+				G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+				break;
 	}
 }
 
@@ -677,30 +737,33 @@ gst_gray16norm_get_property (GObject * object, const guint prop_id,
 {
 	const GstGray16Norm *self = GST_GRAY16NORM (object);
 
-	switch (prop_id) {
-		case PROP_AUTO_RANGE:
-			g_value_set_boolean (value, self->auto_range);
-			break;
-		case PROP_BLACK_LEVEL:
-			g_value_set_uint (value, self->black_level);
-			break;
-		case PROP_WHITE_LEVEL:
-			g_value_set_uint (value, self->white_level);
-			break;
-		case PROP_PALETTE: {
-			const gchar *name = "turbo";
-			switch (self->palette) {
-				case GST_GRAY16NORM_PALETTE_TURBO: name = "turbo"; break;
-				case GST_GRAY16NORM_PALETTE_VIRIDIS: name = "viridis"; break;
-				case GST_GRAY16NORM_PALETTE_MAGMA: name = "magma"; break;
-				case GST_GRAY16NORM_PALETTE_JET: name = "jet"; break;
-				case GST_GRAY16NORM_PALETTE_PRISM: name = "prism"; break;
-			}
-			g_value_set_string (value, name);
-			break; }
-		default:
-			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
-			break;
+		switch (prop_id) {
+			case PROP_AUTO_RANGE:
+				g_value_set_boolean (value, self->auto_range);
+				break;
+			case PROP_BLACK_LEVEL:
+				g_value_set_uint (value, self->black_level);
+				break;
+			case PROP_WHITE_LEVEL:
+				g_value_set_uint (value, self->white_level);
+				break;
+			case PROP_PALETTE: {
+				const gchar *name = "turbo";
+				switch (self->palette) {
+					case GST_GRAY16NORM_PALETTE_TURBO: name = "turbo"; break;
+					case GST_GRAY16NORM_PALETTE_VIRIDIS: name = "viridis"; break;
+					case GST_GRAY16NORM_PALETTE_MAGMA: name = "magma"; break;
+					case GST_GRAY16NORM_PALETTE_JET: name = "jet"; break;
+					case GST_GRAY16NORM_PALETTE_PRISM: name = "prism"; break;
+				}
+				g_value_set_string (value, name);
+				break; }
+			case PROP_MINMAX_EVERY_N:
+				g_value_set_uint (value, self->minmax_every_n);
+				break;
+			default:
+				G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+				break;
 	}
 }
 
@@ -716,6 +779,7 @@ gst_gray16norm_class_init (GstGray16NormClass * klass)
 
 	gobject_class->set_property = gst_gray16norm_set_property;
 	gobject_class->get_property = gst_gray16norm_get_property;
+	gobject_class->dispose      = gst_gray16norm_dispose;
 
 	g_object_class_install_property (
 			gobject_class, PROP_AUTO_RANGE,
@@ -746,6 +810,14 @@ gst_gray16norm_class_init (GstGray16NormClass * klass)
 				"turbo",
 				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+	/* Recompute auto-range min/max every Nth frame (1 = every frame). */
+	g_object_class_install_property (
+			gobject_class, PROP_MINMAX_EVERY_N,
+			g_param_spec_uint ("minmax-every-n", "Auto-range frequency",
+				"When auto-range=true, recompute exact min/max every Nth frame (1 = each frame)",
+				1, G_MAXUINT, 1,
+				G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
 	gst_element_class_set_static_metadata (element_class,
 			"Gray16 normalizer", "Filter/Effect/Video",
 			"Normalize GRAY16 to GRAY8 or map to RGB via LUT; auto or manual range",
@@ -774,6 +846,31 @@ gst_gray16norm_init (GstGray16Norm * self)
 	self->black_level = 0;
 	self->white_level = 65535;
 	self->palette     = GST_GRAY16NORM_PALETTE_TURBO;
+
+	self->last_min = 0;
+	self->last_max = 65535;
+	self->minmax_every_n = 1;
+	self->frame_index = 0;
+
+	self->cached_frame_lut = NULL;
+	self->lut_valid = FALSE;
+	self->lut_min = 0;
+	self->lut_max = 0;
+	self->lut_palette = self->palette;
+	self->lut_format = GST_VIDEO_FORMAT_UNKNOWN;
+}
+
+/* Free cached buffers */
+static void
+gst_gray16norm_dispose (GObject *object)
+{
+  GstGray16Norm *self = GST_GRAY16NORM (object);
+  if (self->cached_frame_lut) {
+    g_free (self->cached_frame_lut);
+    self->cached_frame_lut = NULL;
+  }
+  self->lut_valid = FALSE;
+  G_OBJECT_CLASS (gst_gray16norm_parent_class)->dispose (object);
 }
 
 /* plugin registration moved to gstgray16plugin.c */
