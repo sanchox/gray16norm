@@ -138,19 +138,25 @@ static gboolean build_lut_for_format (GstGray16Color *self)
   if (!mem) return FALSE;
 
   if (elem_size == 4) {
+    /* Pack values in LITTLE-ENDIAN BYTE ORDER for memory layout:
+     * RGBx: [R][G][B][X]
+     * BGRx: [B][G][R][X]
+     * RGBA: [R][G][B][A]
+     * BGRA: [B][G][R][A]
+     */
     guint32 *L = (guint32 *)mem;
     const gboolean is_rgbx = (fmt == GST_VIDEO_FORMAT_RGBx);
     const gboolean is_bgrx = (fmt == GST_VIDEO_FORMAT_BGRx);
     const gboolean is_rgba = (fmt == GST_VIDEO_FORMAT_RGBA);
     const gboolean is_bgra = (fmt == GST_VIDEO_FORMAT_BGRA);
-    const guint32 A = ((guint32)self->alpha) << 24;
+    const guint32 A = (guint32) self->alpha; /* goes to highest byte */
     for (guint i = 0; i < 65536; i++) {
       const guint8 r = pal[i][0], g = pal[i][1], b = pal[i][2];
       guint32 px;
-      if (is_rgbx)      px = ((guint32)r << 16) | ((guint32)g << 8) | (guint32)b;
-      else if (is_bgrx) px = ((guint32)b << 16) | ((guint32)g << 8) | (guint32)r;
-      else if (is_rgba) px = A | ((guint32)r << 16) | ((guint32)g << 8) | (guint32)b;
-      else /* BGRA */   px = A | ((guint32)b << 16) | ((guint32)g << 8) | (guint32)r;
+      if (is_rgbx)      px = ((guint32)r) | ((guint32)g << 8) | ((guint32)b << 16);
+      else if (is_bgrx) px = ((guint32)b) | ((guint32)g << 8) | ((guint32)r << 16);
+      else if (is_rgba) px = ((guint32)r) | ((guint32)g << 8) | ((guint32)b << 16) | (A << 24);
+      else /* BGRA */   px = ((guint32)b) | ((guint32)g << 8) | ((guint32)r << 16) | (A << 24);
       L[i] = px;
     }
   } else {
