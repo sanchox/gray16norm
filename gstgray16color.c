@@ -148,7 +148,6 @@ static gboolean build_lut_for_format (GstGray16Color *self)
     const gboolean is_rgbx = (fmt == GST_VIDEO_FORMAT_RGBx);
     const gboolean is_bgrx = (fmt == GST_VIDEO_FORMAT_BGRx);
     const gboolean is_rgba = (fmt == GST_VIDEO_FORMAT_RGBA);
-    const gboolean is_bgra = (fmt == GST_VIDEO_FORMAT_BGRA);
     const guint32 A = (guint32) self->alpha; /* goes to highest byte */
     for (guint i = 0; i < 65536; i++) {
       const guint8 r = pal[i][0], g = pal[i][1], b = pal[i][2];
@@ -163,7 +162,6 @@ static gboolean build_lut_for_format (GstGray16Color *self)
     guint16 *L = (guint16 *)mem;
     const gboolean is_rgb16 = (fmt == GST_VIDEO_FORMAT_RGB16);
     const gboolean is_bgr16 = (fmt == GST_VIDEO_FORMAT_BGR16);
-    const gboolean is_rgb15 = (fmt == GST_VIDEO_FORMAT_RGB15);
     for (guint i = 0; i < 65536; i++) {
       const guint8 r8 = pal[i][0], g8 = pal[i][1], b8 = pal[i][2];
       guint16 px;
