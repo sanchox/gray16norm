@@ -471,9 +471,33 @@ gst_gray16norm_transform_frame (GstVideoFilter * video_filter,
         }
 
         for (gsize y = 0; y < height; y++) {
-          const guint16 *in_line = (const guint16 *) (in_base + y * in_stride);
-          guint32 *out32 = (guint32 *) (out_base + y * out_stride);
-          for (gsize x = 0; x < width; x++) {
+          const guint16 * restrict in_line = (const guint16 *) (in_base + y * in_stride);
+          guint32 * restrict out32 = (guint32 *) (out_base + y * out_stride);
+          gsize x = 0;
+          /* Unroll by 8 for better ILP; add light prefetching */
+          for (; x + 8 <= width; x += 8) {
+            /* Prefetch next input chunk and a few LUT entries ahead */
+            __builtin_prefetch (in_line + x + 16);
+            const guint16 v0 = in_line[x + 0];
+            const guint16 v1 = in_line[x + 1];
+            const guint16 v2 = in_line[x + 2];
+            const guint16 v3 = in_line[x + 3];
+            const guint16 v4 = in_line[x + 4];
+            const guint16 v5 = in_line[x + 5];
+            const guint16 v6 = in_line[x + 6];
+            const guint16 v7 = in_line[x + 7];
+            __builtin_prefetch (self->cached_frame_lut + v4);
+            __builtin_prefetch (self->cached_frame_lut + v7);
+            out32[x + 0] = self->cached_frame_lut[v0];
+            out32[x + 1] = self->cached_frame_lut[v1];
+            out32[x + 2] = self->cached_frame_lut[v2];
+            out32[x + 3] = self->cached_frame_lut[v3];
+            out32[x + 4] = self->cached_frame_lut[v4];
+            out32[x + 5] = self->cached_frame_lut[v5];
+            out32[x + 6] = self->cached_frame_lut[v6];
+            out32[x + 7] = self->cached_frame_lut[v7];
+          }
+          for (; x < width; x++) {
             const guint16 v = in_line[x];
             out32[x] = self->cached_frame_lut[v];
           }
