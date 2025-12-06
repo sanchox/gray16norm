@@ -302,12 +302,21 @@ gst_gray16color_transform_caps (GstBaseTransform *trans, GstPadDirection directi
     }
   }
 
+  /* Duplicate caps with memory:DMABuf to advertise DMABuf capability */
+  GstCaps *dmabuf_caps = gst_caps_copy (result);
+  const guint m = gst_caps_get_size (dmabuf_caps);
+  for (guint i = 0; i < m; i++) {
+    gst_caps_set_features (dmabuf_caps, i,
+        gst_caps_features_new ("memory:DMABuf", NULL));
+  }
+  GstCaps *merged = gst_caps_merge (result, dmabuf_caps);
+
   if (filter) {
-    GstCaps *intersection = gst_caps_intersect_full (result, filter, GST_CAPS_INTERSECT_FIRST);
-    gst_caps_unref (result);
+    GstCaps *intersection = gst_caps_intersect_full (merged, filter, GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (merged);
     return intersection;
   }
-  return result;
+  return merged;
 }
 
 static void gst_gray16color_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec)

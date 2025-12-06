@@ -32,29 +32,29 @@ run_pipe() {
 
 # Auto mode: videotestsrc → GRAY16_LE → gray16norm → fakesink
 run_pipe "auto-gray8" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
+  videotestsrc num-buffers=5 ! \
   video/x-raw,format=GRAY16_LE ! gray16norm ! fakesink sync=false
 
 # Manual mode: use explicit black/white levels
 run_pipe "manual-gray8" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
+  videotestsrc num-buffers=5 ! \
   video/x-raw,format=GRAY16_LE ! gray16norm auto-range=false black-level=1000 white-level=20000 ! \
   fakesink sync=false
 
 # Normalized color output via gray16norm (RGBx)
 run_pipe "norm-color-rgbx" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
+  videotestsrc num-buffers=5 ! \
   video/x-raw,format=GRAY16_LE ! gray16norm palette=viridis ! \
   video/x-raw,format=RGBx ! fakesink sync=false
 
 # Color output via gray16color (tabular Gray16->color, no normalization)
 run_pipe "color-rgbx-viridis" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
+  videotestsrc num-buffers=5 ! \
   video/x-raw,format=GRAY16_LE ! gray16color palette=viridis ! \
   video/x-raw,format=RGBx ! fakesink sync=false
 
 run_pipe "color-bgr16-turbo" \
-  videotestsrc num-buffers=5 ! videoconvert ! \
+  videotestsrc num-buffers=5 ! \
   video/x-raw,format=GRAY16_LE ! gray16color palette=turbo ! \
   video/x-raw,format=BGR16 ! fakesink sync=false
 

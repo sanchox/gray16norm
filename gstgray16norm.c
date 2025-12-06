@@ -11,6 +11,8 @@
 #include <gst/video/gstvideofilter.h>
 #include <gst/base/gstbasetransform.h>
 #include <gst/gstutils.h>
+#include <gst/video/gstvideometa.h>
+#include <gst/allocators/gstdmabuf.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -650,8 +652,11 @@ gst_gray16norm_transform_caps (GstBaseTransform * trans,
 			return intersection;
 		}
 
-		return tmpl;
-	}
+  /* Note: pad templates don't advertise memory features explicitly.
+     * Actual memory features (e.g., memory:DMABuf) will be added in the
+     * non-ANY path below during transform_caps negotiation. */
+    return tmpl;
+  }
 
 	if (gst_caps_is_empty (caps)) {
 		return gst_caps_new_empty ();
@@ -687,14 +692,112 @@ gst_gray16norm_transform_caps (GstBaseTransform * trans,
 		}
 	}
 
-	if (filter) {
-		GstCaps *intersection = gst_caps_intersect_full (result, filter,
-				GST_CAPS_INTERSECT_FIRST);
-		gst_caps_unref (result);
-		return intersection;
-	}
+  /* Duplicate caps with memory:DMABuf features to advertise DMABuf support */
+  GstCaps *dmabuf_caps = gst_caps_copy (result);
+  const guint m = gst_caps_get_size (dmabuf_caps);
+  for (guint i = 0; i < m; i++) {
+    gst_caps_set_features (dmabuf_caps, i,
+        gst_caps_features_new ("memory:DMABuf", NULL));
+  }
+  GstCaps *merged = gst_caps_merge (result, dmabuf_caps);
 
-	return result;
+  if (filter) {
+    GstCaps *intersection = gst_caps_intersect_full (merged, filter,
+            GST_CAPS_INTERSECT_FIRST);
+    gst_caps_unref (merged);
+    return intersection;
+  }
+
+  return merged;
+}
+
+/* --- Allocation negotiation (DMABuf-friendly) --- */
+
+static gboolean
+gst_gray16norm_propose_allocation (GstBaseTransform * trans,
+                                   GstQuery * decide_query,
+                                   GstQuery * query)
+{
+  /* Always require GstVideoMeta; allocator suggestion is deferred to decide_allocation
+   * after we know the negotiated caps features. */
+  gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
+  return TRUE;
+}
+
+static gboolean
+gst_gray16norm_decide_allocation (GstBaseTransform * trans,
+                                  GstQuery * query)
+{
+  GstCaps *caps = NULL;
+  gst_query_parse_allocation (query, &caps, NULL);
+  if (!caps) {
+    /* Should not happen; ask upstream for caps */
+    return FALSE;
+  }
+
+  GstVideoInfo vinfo;
+  if (!gst_video_info_from_caps (&vinfo, caps))
+    return FALSE;
+
+  /* If downstream already proposed a pool, keep it. */
+  GstBufferPool *pool = NULL;
+  guint size = GST_VIDEO_INFO_SIZE (&vinfo);
+  guint min = 2, max = 0; /* 0 = unlimited */
+  if (gst_query_get_n_allocation_pools (query) > 0) {
+    gst_query_parse_nth_allocation_pool (query, 0, &pool, &size, &min, &max);
+  }
+
+  if (!pool) {
+    pool = gst_video_buffer_pool_new ();
+  }
+
+  GstStructure *config = gst_buffer_pool_get_config (pool);
+  gst_buffer_pool_config_set_params (config, caps, size, min, max);
+  gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+
+  /* Decide whether DMABuf was negotiated on our src pad caps. Only prefer DMABuf
+   * allocator if features explicitly contain memory:DMABuf. */
+  gboolean use_dmabuf = FALSE;
+  do {
+    GstPad *srcpad = GST_BASE_TRANSFORM_SRC_PAD (trans);
+    if (!srcpad) break;
+    GstCaps *current = gst_pad_get_current_caps (srcpad);
+    if (!current) break;
+    /* Iterate structures and check features */
+    const guint n = gst_caps_get_size (current);
+    for (guint i = 0; i < n; i++) {
+      const GstCapsFeatures *feat = gst_caps_get_features (current, i);
+      if (feat && gst_caps_features_contains (feat, "memory:DMABuf")) {
+        use_dmabuf = TRUE;
+        break;
+      }
+    }
+    gst_caps_unref (current);
+  } while (0);
+
+  if (use_dmabuf) {
+    GstAllocator *dmabuf_alloc = gst_dmabuf_allocator_new ();
+    if (dmabuf_alloc) {
+      gst_buffer_pool_config_set_allocator (config, dmabuf_alloc, NULL);
+      gst_object_unref (dmabuf_alloc);
+    }
+  }
+
+  if (!gst_buffer_pool_set_config (pool, config)) {
+    gst_object_unref (pool);
+    return FALSE;
+  }
+
+  /* Replace any existing pool entry */
+  while (gst_query_get_n_allocation_pools (query) > 0)
+    gst_query_remove_nth_allocation_pool (query, 0);
+  gst_query_add_allocation_pool (query, pool, size, min, max);
+  gst_object_unref (pool);
+
+  /* Ensure we request GstVideoMeta on allocations */
+  gst_query_add_allocation_meta (query, GST_VIDEO_META_API_TYPE, NULL);
+
+  return TRUE;
 }
 
 
@@ -857,7 +960,9 @@ gst_gray16norm_class_init (GstGray16NormClass * klass)
 	video_filter_class->set_info        = gst_gray16norm_set_info;
 	video_filter_class->transform_frame = gst_gray16norm_transform_frame;
 
-	bt_class->transform_caps            = gst_gray16norm_transform_caps;
+ bt_class->transform_caps            = gst_gray16norm_transform_caps;
+ bt_class->propose_allocation        = gst_gray16norm_propose_allocation;
+ bt_class->decide_allocation         = gst_gray16norm_decide_allocation;
 
 	GST_DEBUG_CATEGORY_INIT (gst_gray16norm_debug, "gray16norm", 0,
 			"GRAY16 normalizer to GRAY8 or RGB (LUT)");

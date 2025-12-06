@@ -15,7 +15,8 @@ LUT_HEADERS := \
   gray16_to_rgb_lut_prism.h
 
 # Dependencies
-GST_DEPS    ?= gstreamer-1.0 gstreamer-video-1.0
+# Add gstreamer-allocators-1.0 to enable DMABuf allocator usage at runtime
+GST_DEPS    ?= gstreamer-1.0 gstreamer-video-1.0 gstreamer-allocators-1.0
 
 # Flags
 CSTD        ?= -std=gnu11
